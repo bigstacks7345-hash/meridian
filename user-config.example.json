@@ -2,7 +2,10 @@
   "_readme": [
     "Standalone wallet-triggered bot. Copy to user-config.json and edit.",
     "Omitted keys fall back to the defaults in config.js.",
-    "shadowMode: true forces DRY_RUN; set false and remove DRY_RUN=true only when ready for live trading.",
+    "shadowMode is on unless this file sets it to false. On forces DRY_RUN to the exact string true.",
+    "DRY_RUN values other than true do not block submits once shadowMode is false.",
+    "rpcUrl in this example is a public mainnet endpoint. Shadow mode still uses it for reads if you start the daemon.",
+    "Do not put a private key in this file. A walletKey field is loaded into WALLET_PRIVATE_KEY.",
     "The previous LLM/server-driven implementation is archived on the local legacy branch."
   ],
   "shadowMode": true,

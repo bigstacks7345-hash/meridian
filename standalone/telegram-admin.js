@@ -9,7 +9,7 @@
 import fs from "node:fs";
 import { Keypair } from "@solana/web3.js";
 import bs58 from "bs58";
-import { config, MIN_SAFE_BINS_BELOW } from "../config.js";
+import { config, MIN_SAFE_BINS_BELOW, transactionsAreDryRun } from "../config.js";
 import { log } from "../logger.js";
 import { repoPath } from "../repo-root.js";
 import { addSmartWallet, removeSmartWallet, listSmartWallets } from "../smart-wallets.js";
@@ -252,8 +252,17 @@ function rootKeyboard() {
   ];
 }
 
+export function submissionBanner() {
+  if (transactionsAreDryRun()) {
+    return config.standalone.shadow
+      ? "🌑 SHADOW — nothing is submitted"
+      : "🟡 Shadow is off, but DRY_RUN=true still blocks every submit";
+  }
+  return "🔴 LIVE — real transactions";
+}
+
 function rootText() {
-  return `<b>⚙️ Meridian admin</b>\n<i>${config.standalone.shadow ? "🌑 SHADOW — nothing is submitted" : "🔴 LIVE — real transactions"}</i>\nPick a section:`;
+  return `<b>⚙️ Meridian admin</b>\n<i>${submissionBanner()}</i>\nPick a section:`;
 }
 
 function editHint(setting) {
@@ -350,7 +359,7 @@ async function statusText() {
   const fallbackUrl = config.standalone.fallbackRpcUrl;
   const lines = [
     `🖥 <b>Status</b>`,
-    `Mode: ${config.standalone.shadow ? "🌑 SHADOW" : "🔴 LIVE"} | DRY_RUN=${process.env.DRY_RUN === "true"}`,
+    `Mode: ${submissionBanner()}`,
     `Uptime: ${Math.floor(process.uptime() / 60)} min`,
     `Wallets monitored: ${wallets.total} (trigger: ${config.standalone.walletThreshold} in ${config.standalone.windowSec}s)`,
     `RPC: monitor=${hostOf(monitorUrl)} balance=${hostOf(balanceUrl)}${fallbackUrl ? ` fallback=${hostOf(fallbackUrl)}` : ""}`,
@@ -453,7 +462,10 @@ async function handleCallback(cb) {
     }
     if (data === "m:shadow") {
       const next = !config.standalone.shadow;
-      return void await render(`Set mode to <b>${next ? "SHADOW (nothing submitted)" : "LIVE"}</b>?`, [
+      const liveDetail = envValue("DRY_RUN") === "true"
+        ? "shadow off — the .env DRY_RUN=true line still blocks submits until it is removed and the process restarts"
+        : "LIVE (real transactions on the next submit)";
+      return void await render(`Set mode to <b>${next ? "SHADOW (nothing submitted)" : liveDetail}</b>?`, [
         [{ text: next ? "🌑 Shadow" : "🔴 LIVE", callback_data: "m:shadow2" }, { text: "✖️ Cancel", callback_data: "s:root" }],
       ]);
     }

@@ -6,7 +6,7 @@
 // (close_position > other writes > deploy_position) in standalone/transactions.js.
 
 import fs from "node:fs";
-import { config, computeDeployAmount } from "../config.js";
+import { config, computeDeployAmount, transactionsAreDryRun } from "../config.js";
 import { log } from "../logger.js";
 import { repoPath } from "../repo-root.js";
 import { sendMessage as tgSend, isEnabled as tgEnabled } from "../telegram.js";
@@ -245,7 +245,8 @@ export async function manageOnce() {
       if (!action) continue;
       const res = await executeTool(action.tool, action.args).catch(e => ({ error: e.message }));
       const ok = res?.success !== false && !res?.error && !res?.blocked;
-      log("manage", `${p.pair ?? p.position.slice(0, 8)}: ${action.label} ${ok ? "done" : `FAILED — ${res?.error || res?.reason || "unknown"}`}`);
+      const outcome = res?.dry_run ? "shadow (not submitted)" : ok ? "done" : `FAILED — ${res?.error || res?.reason || "unknown"}`;
+      log("manage", `${p.pair ?? p.position.slice(0, 8)}: ${action.label} ${outcome}`);
     }
     return null;
   } finally {
@@ -279,7 +280,8 @@ function startPnlPoller() {
         try {
           const res = await executeTool("close_position", { position_address: p.position, reason }).catch(e => ({ error: e.message }));
           const ok = res?.success !== false && !res?.error && !res?.blocked;
-          log("poll", `${p.pair ?? p.position.slice(0, 8)}: ${ok ? "closed" : `close FAILED — ${res?.error || res?.reason || "unknown"}`}`);
+          const outcome = res?.dry_run ? "shadow (not submitted)" : ok ? "closed" : `close FAILED — ${res?.error || res?.reason || "unknown"}`;
+          log("poll", `${p.pair ?? p.position.slice(0, 8)}: ${outcome}`);
         } finally {
           manageBusy = false;
         }
@@ -299,7 +301,8 @@ function startHeartbeat() {
     const active = Object.values(store.data.signals).filter(s => !s.done).length;
     const pending = Object.keys(store.data.pending).length;
     const lag = stats.lastLagMs != null ? `${(stats.lastLagMs / 1000).toFixed(1)}s` : "n/a";
-    log("heartbeat", `mode=${config.standalone.shadow ? "shadow" : "live"} | monitor tx=${stats.transactions ?? 0} entries=${stats.entries ?? 0} lag=${lag} pending=${pending} errors=${stats.errors ?? 0} | signals active=${active} queued=${signalQueue.length}`);
+    const mode = transactionsAreDryRun() ? (config.standalone.shadow ? "shadow" : "dry-run") : "live";
+    log("heartbeat", `mode=${mode} | monitor tx=${stats.transactions ?? 0} entries=${stats.entries ?? 0} lag=${lag} pending=${pending} errors=${stats.errors ?? 0} | signals active=${active} queued=${signalQueue.length}`);
     store.prune();
     store.save();
   }, 60_000);
@@ -343,7 +346,10 @@ export async function startStandalone() {
   }
 
   monitor = new WalletMonitor(store, config.standalone, { onSignal });
-  log("runtime", `Standalone starting — ${config.standalone.shadow ? "SHADOW MODE (proposals recorded, nothing submitted)" : "LIVE MODE"} | threshold=${config.standalone.walletThreshold} wallets / ${config.standalone.windowSec}s window | screening deadline=${config.standalone.screeningDeadlineSec}s`);
+  const modeLabel = transactionsAreDryRun()
+    ? (config.standalone.shadow ? "SHADOW MODE (proposals recorded, nothing submitted)" : "DRY RUN (shadow is off, but DRY_RUN=true still blocks submits)")
+    : "LIVE MODE";
+  log("runtime", `Standalone starting — ${modeLabel} | threshold=${config.standalone.walletThreshold} wallets / ${config.standalone.windowSec}s window | screening deadline=${config.standalone.screeningDeadlineSec}s`);
 
   await monitor.start();
   if (!monitor.healthy()) {
@@ -361,7 +367,10 @@ export async function startStandalone() {
   });
 
   const trackedWallets = Object.keys(store.data.wallets).length;
-  void notify(`🤖 Meridian started — ${config.standalone.shadow ? "SHADOW (nothing submitted)" : "LIVE"}\n${trackedWallets} wallet(s) monitored | trigger: ${config.standalone.walletThreshold} within ${config.standalone.windowSec}s | exits: ${config.pnl.pollIntervalSec}s poller`);
+  const started = transactionsAreDryRun()
+    ? (config.standalone.shadow ? "SHADOW (nothing submitted)" : "DRY RUN (nothing submitted)")
+    : "LIVE";
+  void notify(`🤖 Meridian started — ${started}\n${trackedWallets} wallet(s) monitored | trigger: ${config.standalone.walletThreshold} within ${config.standalone.windowSec}s | exits: ${config.pnl.pollIntervalSec}s poller`);
 
   process.on("SIGINT", () => void shutdown("SIGINT"));
   process.on("SIGTERM", () => void shutdown("SIGTERM"));

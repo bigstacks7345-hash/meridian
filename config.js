@@ -177,6 +177,12 @@ export const config = {
 // Shadow applies to every existing transaction path, including CLI commands.
 if (config.standalone.shadow) process.env.DRY_RUN = "true";
 
+// Submit gates must follow the in-memory shadow flag. DRY_RUN is an extra lock
+// only when it is exactly the string "true"; "1", "TRUE", and "false" do not disarm.
+export function transactionsAreDryRun() {
+  return config.standalone.shadow || process.env.DRY_RUN === "true";
+}
+
 /**
  * Compute the optimal deploy amount for a given wallet balance.
  * Scales position size with wallet growth (compounding).

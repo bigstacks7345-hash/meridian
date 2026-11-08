@@ -8,7 +8,7 @@ import {
 import bs58 from "bs58";
 import { rpcBalances, priceBalances } from "../standalone/balances.js";
 import { log } from "../logger.js";
-import { config } from "../config.js";
+import { config, transactionsAreDryRun } from "../config.js";
 
 let _connection = null;
 let _wallet = null;
@@ -28,10 +28,10 @@ function getWallet() {
 
 const JUPITER_PRICE_API = "https://api.jup.ag/price/v3";
 const JUPITER_SWAP_V2_API = "https://api.jup.ag/swap/v2";
-const DEFAULT_JUPITER_API_KEY = "b15d42e9-e0e4-4f90-a424-ae41ceeaa382";
 
 function getJupiterApiKey() {
-  return config.jupiter.apiKey || process.env.JUPITER_API_KEY || DEFAULT_JUPITER_API_KEY;
+  // No baked-in key. Missing JUPITER_API_KEY sends the request without x-api-key.
+  return config.jupiter.apiKey || process.env.JUPITER_API_KEY || "";
 }
 
 function getJupiterReferralParams() {
@@ -92,7 +92,7 @@ export async function swapToken({
   input_mint  = normalizeMint(input_mint);
   output_mint = normalizeMint(output_mint);
 
-  if (process.env.DRY_RUN === "true") {
+  if (transactionsAreDryRun()) {
     return {
       dry_run: true,
       would_swap: { input_mint, output_mint, amount },
