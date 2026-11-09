@@ -5,6 +5,7 @@ import { lockPoc } from "../strategy/rules.js";
 import {
   birdeyeMarketData,
   buildBirdeyeOhlcvRequest,
+  completed5m,
   createMarketData,
   fetchGmgn1m,
   parseBirdeyeOhlcv,
@@ -114,7 +115,7 @@ test("GMGN pagination walks backwards, paces a 5-credit window, and stops on 429
   assert.ok(calls[2].includes("from=0"));
   assert.deepEqual(sleeps, [1000]);
   const parsed = parseGmgnKlines({ list: [{ time: 60, open: "1", high: "1", low: "1", close: "1", volume: "8", amount: "4" }] });
-  assert.equal(parsed.candles[0].v, 4);
+  assert.equal(parsed.candles[0].v, 8);
 
   let fetches = 0;
   const stopped = await fetchGmgn1m({
@@ -150,13 +151,38 @@ test("a missing minute fails closed", async () => {
       ok: true,
       status: 200,
       json: async () => ({ list: [
-        { time: 0, open: "1", high: "1", low: "1", close: "1", amount: "1" },
-        { time: 120, open: "1", high: "1", low: "1", close: "1", amount: "1" },
+        { time: 0, open: "1", high: "1", low: "1", close: "1", volume: "1", amount: "9" },
+        { time: 120, open: "1", high: "1", low: "1", close: "1", volume: "1", amount: "9" },
       ] }),
     }),
   });
   assert.equal(result.ok, false);
   assert.match(result.reason, /gap|incomplete/);
+});
+
+test("GMGN volume is USD notional and amount is token units", () => {
+  const sample = {
+    time: 1794140400000,
+    open: "89.51997818",
+    close: "89.5411681",
+    high: "90.011559386",
+    low: "89.11698592",
+    volume: "347014.88535799",
+    amount: "3877.094302135",
+  };
+  const parsed = parseGmgnKlines({ list: [sample] });
+  assert.equal(parsed.ok, true);
+  const candle = parsed.candles[0];
+  assert.equal(candle.v, 347014.88535799);
+  assert.notEqual(candle.v, 3877.094302135);
+  const ratio = candle.v / Number(sample.amount);
+  assert.ok(Math.abs(ratio - Number(sample.close)) < 0.05, `volume/amount ${ratio} should track the SOL price`);
+  const profile = volumeProfile([candle], { rows: 4, valueArea: 0.7 });
+  assert.ok(Math.abs(profile.totalVolume - candle.v) < 1e-6);
+  const five = Array.from({ length: 5 }, (_, index) => ({ ...candle, t: candle.t + index * 60_000 }));
+  const bar = completed5m(five).at(-1);
+  assert.equal(bar.v, candle.v * 5);
+  assert.ok(bar.v >= 90_000);
 });
 
 test("Birdeye adapter is configurable, stubbed, and sends no API key", async () => {

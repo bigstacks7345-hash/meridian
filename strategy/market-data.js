@@ -52,7 +52,8 @@ export function createRequestBudget({ limit = 5, windowMs = 1000 } = {}) {
   };
 }
 
-export function parseGmgnKlines(body, usdField = "amount") {
+// GMGN token_kline: `volume` is quote/USD notional and `amount` is token units.
+export function parseGmgnKlines(body, usdField = "volume") {
   const list = Array.isArray(body?.list) ? body.list : Array.isArray(body?.data?.list) ? body.data.list : null;
   if (!list) return { ok: false, reason: "gmgn kline payload incomplete" };
   const candles = [];

@@ -45,7 +45,7 @@ Balances use standard RPC, including SPL Token and Token-2022. PnL defaults to M
 
 This build forces shadow mode and `DRY_RUN=true`. `npm run safety` stays at `"willSubmit": false`. Telegram notifications can still be sent. The admin console does not start, so it cannot arm trading, import a key, or display a key.
 
-The owner parameters live in `ownerStrategy` inside [user-config.example.json](user-config.example.json). The volume profile is a TradingView visible-range VPVR equivalent: 24 rows over the 24h high/low of 1-minute bars, up/down split by candle direction, and TradingView's one-row value-area rule. It is computed once at a shadow entry and locked. `candleProvider` defaults to `none` and fails closed. `gmgn` paginates `/v1/market/token_kline`, and `birdeye` is a stub for `/defi/v3/ohlcv`.
+The owner parameters live in `ownerStrategy` inside [user-config.example.json](user-config.example.json). The volume profile is a TradingView visible-range VPVR equivalent: 24 rows over the 24h high/low of 1-minute bars, up/down split by candle direction, and TradingView's one-row value-area rule. It is computed once at a shadow entry and locked. `candleProvider` defaults to `none` and fails closed. `gmgn` paginates `/v1/market/token_kline` and uses the `volume` field as USD notional (`amount` is token units). `birdeye` is a stub for `/defi/v3/ohlcv`.
 
 `npm run shadow-replay` runs one offline scenario and does not sign or broadcast.
 

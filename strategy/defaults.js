@@ -79,7 +79,7 @@ export const OWNER_STRATEGY = {
   gmgnChain: "sol",
   gmgnResolution: "1m",
   gmgnPageBars: 100,
-  gmgnUsdField: "amount",
+  gmgnUsdField: "volume",
   gmgnCreditLimit: 5,
   gmgnWindowMs: 1000,
   gmgnCandleCreditCost: 2,
