@@ -43,6 +43,10 @@ export function passingSnapshot(mint = "MintReplay111111111111111111111111111111
     liquidityUsd: 50_000,
     mcapUsd: 400_000,
     holders: 2_000,
+    priceDenomination: "quote",
+    quoteMint: OWNER_STRATEGY.quoteMint,
+    quoteSymbol: OWNER_STRATEGY.quoteSymbol,
+    volumeDenomination: "usd",
     ...history,
   };
 }

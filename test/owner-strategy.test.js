@@ -118,18 +118,23 @@ test("size is 0.25 spot plus 0.25 bid/ask, with two positions and a three minute
 });
 
 test("exits are stop, hard target, one-point trail, or a completed 5m close below a deep POC", () => {
-  const hold = { status: "proposed", peakPnlPct: 0, pocValid: true, pocPrice: 10 };
-  assert.equal(stepShadowPosition(hold, { pnlPct: 1 }, rules).exit, null);
-  assert.equal(stepShadowPosition(hold, { pnlPct: -0.5 }, rules).exit, null);
-  assert.equal(stepShadowPosition(hold, { pnlPct: 1.85 }, rules).exit, null);
-  assert.equal(evaluateExit({ peakPnlPct: 2, pocValid: false }, { pnlPct: 1 }, rules).rule, "trail");
-  assert.equal(evaluateExit({ peakPnlPct: 2, pocValid: false }, { pnlPct: 1.01 }, rules).action, null);
-  assert.equal(evaluateExit({ peakPnlPct: 4, pocValid: false }, { pnlPct: 5 }, rules).rule, "hard-take-profit");
-  assert.equal(evaluateExit({ peakPnlPct: 0, pocValid: false }, { pnlPct: -17 }, rules).rule, "stop");
-  assert.equal(evaluateExit({ peakPnlPct: 0, pocValid: true, pocPrice: 10 }, { pnlPct: 0.2 }, rules).action, null);
-  assert.equal(evaluateExit({ peakPnlPct: 0, pocValid: true, pocPrice: 10 }, { pnlPct: 0.2, completed5mClose: 9.9 }, rules).rule, "poc");
-  assert.equal(evaluateExit({ peakPnlPct: 0, pocValid: false, pocPrice: 10 }, { pnlPct: 0.2, completed5mClose: 9.9 }, rules).action, null);
-  assert.equal(stepShadowPosition(hold, { pnlPct: null }, rules).held, "pnl unavailable");
+  const quote = { pnlDenomination: "quote" };
+  const hold = { status: "proposed", peakPnlPct: 0, pocValid: true, pocPrice: 10, pnlDenomination: "quote", entryQuotePrice: 1 };
+  assert.equal(stepShadowPosition(hold, { ...quote, pnlPct: 1 }, rules).exit, null);
+  assert.equal(stepShadowPosition(hold, { ...quote, pnlPct: -0.5 }, rules).exit, null);
+  assert.equal(stepShadowPosition(hold, { ...quote, pnlPct: 1.85 }, rules).exit, null);
+  assert.equal(evaluateExit({ ...hold, peakPnlPct: 2, pocValid: false }, { ...quote, pnlPct: 1 }, rules).rule, "trail");
+  assert.equal(evaluateExit({ ...hold, peakPnlPct: 2, pocValid: false }, { ...quote, pnlPct: 1.01 }, rules).action, null);
+  assert.equal(evaluateExit({ ...hold, peakPnlPct: 4, pocValid: false }, { ...quote, pnlPct: 5 }, rules).rule, "hard-take-profit");
+  assert.equal(evaluateExit({ ...hold, peakPnlPct: 0, pocValid: false }, { ...quote, pnlPct: -17 }, rules).rule, "stop");
+  assert.equal(evaluateExit(hold, { ...quote, pnlPct: 0.2 }, rules).action, null);
+  assert.equal(evaluateExit(hold, { ...quote, pnlPct: 0.2, completed5mClose: 9.9 }, rules).rule, "poc");
+  assert.equal(evaluateExit({ ...hold, pocValid: false }, { ...quote, pnlPct: 0.2, completed5mClose: 9.9 }, rules).action, null);
+  assert.equal(stepShadowPosition(hold, { ...quote, pnlPct: null }, rules).held, "pnl unavailable");
+  assert.equal(evaluateExit(hold, { pnlDenomination: "usd", pnlPct: -17 }, rules).action, null);
+  const meme = { ...hold, entryQuotePrice: 0.001, pocValid: false };
+  assert.equal(evaluateExit(meme, { quotePrice: 0.00083 }, rules).rule, "stop");
+  assert.equal(evaluateExit(meme, { quotePrice: 0.00099 }, rules).action, null);
 });
 
 test("the example config matches the owner defaults and admin polling stays off", () => {

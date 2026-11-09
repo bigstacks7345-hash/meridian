@@ -21,11 +21,11 @@ if (!decision.ok) {
   process.exitCode = 1;
 } else {
   const ticks = [
-    { at: now + 60_000, pnlPct: 1, label: "+1% before activation" },
-    { at: now + 120_000, pnlPct: -0.5, label: "-0.5% before activation" },
-    { at: now + 180_000, pnlPct: 1.85, label: "activation at +1.85%" },
-    { at: now + 240_000, pnlPct: 2, label: "peak +2%" },
-    { at: now + 300_000, pnlPct: 1, label: "trail exit at +1%" },
+    { at: now + 60_000, pnlPct: 1, pnlDenomination: "quote", label: "+1% before activation" },
+    { at: now + 120_000, pnlPct: -0.5, pnlDenomination: "quote", label: "-0.5% before activation" },
+    { at: now + 180_000, pnlPct: 1.85, pnlDenomination: "quote", label: "activation at +1.85%" },
+    { at: now + 240_000, pnlPct: 2, pnlDenomination: "quote", label: "peak +2%" },
+    { at: now + 300_000, pnlPct: 1, pnlDenomination: "quote", label: "trail exit at +1%" },
   ];
   let position = decision.proposal;
   const trace = [];

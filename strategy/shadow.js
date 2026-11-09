@@ -1,6 +1,6 @@
 // Shadow proposals only. This module never imports a signer or an RPC client.
 
-import { canOpen, entryRange, evaluateEntry, evaluateExit, lockPoc, positionLegs, watchedConvergence } from "./rules.js";
+import { canOpen, entryRange, evaluateEntry, evaluateExit, lockPoc, positionLegs, resolveQuotePnl, watchedConvergence } from "./rules.js";
 
 export function planShadowEntry({ signal, snapshot, book = [], rules, now }) {
   const matches = watchedConvergence(signal?.events || [], rules, now).filter(match => match.mint === signal?.mint);
@@ -22,6 +22,10 @@ export function planShadowEntry({ signal, snapshot, book = [], rules, now }) {
     openedAt: now,
     wallets: [...match.wallets].sort(),
     pools: [...new Set(match.events.map(event => event.pool))].sort(),
+    priceDenomination: "quote",
+    quoteMint: rules.quoteMint,
+    pnlDenomination: "quote",
+    entryQuotePrice: snapshot.livePrice,
     livePrice: snapshot.livePrice,
     totalSol: sized.totalSol,
     legs: sized.legs,
@@ -43,10 +47,9 @@ export function planShadowEntry({ signal, snapshot, book = [], rules, now }) {
 
 export function stepShadowPosition(position, tick, rules) {
   if (!position || position.status !== "proposed") return { position, exit: null };
-  if (tick?.pnlPct == null || !Number.isFinite(Number(tick.pnlPct))) {
-    return { position, exit: null, held: "pnl unavailable" };
-  }
-  const pnl = Number(tick.pnlPct);
+  const resolved = resolveQuotePnl(position, tick);
+  if (!resolved.ok) return { position, exit: null, held: resolved.reason };
+  const pnl = resolved.pnlPct;
   const peak = Math.max(position.peakPnlPct ?? 0, pnl);
   const next = { ...position, peakPnlPct: peak };
   const exit = evaluateExit(next, tick, rules);

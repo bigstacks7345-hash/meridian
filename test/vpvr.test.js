@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { volumeProfile } from "../strategy/indicators.js";
+import { supertrend, volumeProfile } from "../strategy/indicators.js";
 import { lockPoc } from "../strategy/rules.js";
 import {
   birdeyeMarketData,
@@ -8,8 +8,10 @@ import {
   completed5m,
   createMarketData,
   fetchGmgn1m,
+  fetchQuoteGmgn1m,
   parseBirdeyeOhlcv,
   parseGmgnKlines,
+  toQuoteCandles,
 } from "../strategy/market-data.js";
 import { OWNER_STRATEGY } from "../strategy/defaults.js";
 
@@ -183,6 +185,74 @@ test("GMGN volume is USD notional and amount is token units", () => {
   const bar = completed5m(five).at(-1);
   assert.equal(bar.v, candle.v * 5);
   assert.ok(bar.v >= 90_000);
+});
+
+test("SOL-quoted POC and Supertrend move when SOL/USD moves and USD price does not", () => {
+  const count = 16;
+  const token = [];
+  const solFlat = [];
+  const solRising = [];
+  for (let i = 0; i < count; i++) {
+    const t = i * 60_000;
+    token.push({ t, o: 10, h: 10.2, l: 9.8, c: 10, v: i === 0 ? 1_000 : 1 });
+    solFlat.push({ t, o: 100, h: 100, l: 100, c: 100, v: 1 });
+    const sol = 100 + i * 10;
+    solRising.push({ t, o: sol, h: sol, l: sol, c: sol, v: 1 });
+  }
+  const flat = toQuoteCandles(token, solFlat);
+  const moved = toQuoteCandles(token, solRising);
+  assert.equal(flat.ok, true);
+  assert.equal(moved.ok, true);
+  assert.equal(flat.candles[0].c, 0.1);
+  assert.equal(flat.candles.at(-1).c, 0.1);
+  assert.ok(moved.candles.at(-1).c < flat.candles.at(-1).c);
+  assert.equal(flat.candles[0].v, 1_000);
+  assert.equal(moved.candles[0].v, 1_000);
+  const flatProfile = volumeProfile(flat.candles, { rows: 4, valueArea: 0.7 });
+  const movedProfile = volumeProfile(moved.candles, { rows: 4, valueArea: 0.7 });
+  const flatTrend = supertrend(flat.candles, { atrLength: 3, factor: 3 });
+  const movedTrend = supertrend(moved.candles, { atrLength: 3, factor: 3 });
+  assert.ok(Math.abs(flatProfile.poc - 0.1) < 0.02);
+  assert.ok(movedProfile.poc < flatProfile.poc);
+  assert.notEqual(movedTrend.value, flatTrend.value);
+  assert.equal(movedTrend.trend, "down");
+  const shifted = solRising.map((candle, index) => index === count - 1 ? { ...candle, t: candle.t + 60_000 } : candle);
+  assert.equal(toQuoteCandles(token, shifted).ok, false);
+});
+
+test("quote candle fetch pages the token and wrapped SOL on one credit budget", async () => {
+  const rules = { ...OWNER_STRATEGY, gmgnPageBars: 10, gmgnCreditLimit: 5, gmgnWindowMs: 1000, gmgnCandleCreditCost: 2 };
+  const calls = [];
+  let clock = 0;
+  const sleeps = [];
+  const result = await fetchQuoteGmgn1m({
+    rules,
+    mint: "TokenMint",
+    from: 0,
+    to: 25 * 60_000,
+    apiKey: "test-key",
+    now: () => clock,
+    sleep: ms => { sleeps.push(ms); clock += ms; return Promise.resolve(); },
+    fetchImpl: async url => {
+      const query = new URL(url).searchParams;
+      calls.push(query.get("address"));
+      const start = Number(query.get("from"));
+      const end = Number(query.get("to"));
+      const list = [];
+      for (let t = start; t < end; t += 60_000) {
+        const sol = query.get("address") === rules.quoteMint;
+        list.push({ time: t / 1000, open: sol ? "100" : "10", high: sol ? "100" : "11", low: sol ? "100" : "9", close: sol ? "100" : "10", volume: "5", amount: "1" });
+      }
+      return { ok: true, status: 200, json: async () => ({ list }) };
+    },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.priceDenomination, "quote");
+  assert.equal(result.candles[0].c, 0.1);
+  assert.equal(result.candles[0].v, 5);
+  assert.equal(calls.filter(address => address === "TokenMint").length, 3);
+  assert.equal(calls.filter(address => address === rules.quoteMint).length, 3);
+  assert.ok(sleeps.length >= 1);
 });
 
 test("Birdeye adapter is configurable, stubbed, and sends no API key", async () => {

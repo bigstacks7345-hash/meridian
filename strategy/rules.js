@@ -45,6 +45,7 @@ export function evaluateEntry(snapshot, rules) {
   const mcap = num(snapshot.mcapUsd);
   const holders = num(snapshot.holders);
   const livePrice = num(snapshot.livePrice);
+  if (snapshot.priceDenomination !== rules.priceDenomination) reasons.push("price denomination is not the pool quote");
   if (binStep == null) reasons.push("bin step unavailable");
   else if (binStep < rules.binStepMin || binStep > rules.binStepMax) reasons.push(`bin step ${binStep} outside ${rules.binStepMin}-${rules.binStepMax}`);
   if (liquidity == null) reasons.push("pool liquidity unavailable");
@@ -182,9 +183,36 @@ export function lockPoc(profile, entryPrice, rules) {
 
 // Same-tick tie break, in time-independent order: stop, hard target, trail, POC.
 // A replay steps ticks in order, so the first tick that qualifies is the exit.
+export function quoteMovePct(entryQuote, markQuote) {
+  const entry = num(entryQuote);
+  const mark = num(markQuote);
+  if (entry == null || mark == null || entry <= 0 || mark <= 0) return null;
+  return (mark / entry - 1) * 100;
+}
+
+// Stop, trail, and hard target are percentages of quote value, not of the USD price.
+export function resolveQuotePnl(position, tick) {
+  if (tick?.quotePrice != null && tick?.priceDenomination !== "usd") {
+    const pnlPct = quoteMovePct(position?.entryQuotePrice, tick.quotePrice);
+    if (pnlPct == null) return { ok: false, reason: "quote price unavailable" };
+    return { ok: true, pnlPct };
+  }
+  if (tick?.pnlDenomination === "usd" || tick?.priceDenomination === "usd" || tick?.completed5mCloseDenomination === "usd") {
+    return { ok: false, reason: "price denomination is not the pool quote" };
+  }
+  if (tick?.pnlDenomination !== "quote" && position?.pnlDenomination !== "quote") {
+    return { ok: false, reason: "pnl denomination is not quote" };
+  }
+  if (tick?.pnlPct == null || !Number.isFinite(Number(tick.pnlPct))) {
+    return { ok: false, reason: "pnl unavailable" };
+  }
+  return { ok: true, pnlPct: Number(tick.pnlPct) };
+}
+
 export function evaluateExit(position, tick, rules) {
-  const pnl = num(tick?.pnlPct);
-  if (pnl == null) return { action: null, reason: "pnl unavailable" };
+  const resolved = resolveQuotePnl(position, tick);
+  if (!resolved.ok) return { action: null, reason: resolved.reason };
+  const pnl = resolved.pnlPct;
   const peak = num(position?.peakPnlPct);
   if (pnl <= rules.stopLossPct) return { action: "CLOSE", rule: "stop", reason: `stop loss ${pnl}%` };
   if (pnl >= rules.hardTakeProfitPct) return { action: "CLOSE", rule: "hard-take-profit", reason: `hard take profit ${pnl}%` };

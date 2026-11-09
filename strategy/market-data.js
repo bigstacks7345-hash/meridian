@@ -153,6 +153,71 @@ function dedupeCandles(candles) {
   return { ok: true, candles: [...byTime.values()] };
 }
 
+// GMGN OHLC is USD. Quote OHLC divides each token candle by the quote-token
+// (wrapped SOL) USD candle at the same timestamp. Volume stays the token's USD
+// notional, so VPVR weights and dollar filters do not change units. High and low
+// use the cross of the two ranges so a SOL wick cannot invert the quote candle.
+export function toQuoteCandles(tokenCandles, quoteUsdCandles) {
+  if (!Array.isArray(tokenCandles) || !Array.isArray(quoteUsdCandles) || tokenCandles.length === 0) {
+    return { ok: false, reason: "quote candle timestamps are misaligned" };
+  }
+  if (tokenCandles.length !== quoteUsdCandles.length) return { ok: false, reason: "quote candle timestamps are misaligned" };
+  const quoteByTime = new Map();
+  for (const candle of quoteUsdCandles) {
+    if (!Number.isFinite(candle?.t) || quoteByTime.has(candle.t)) return { ok: false, reason: "quote candle timestamps are misaligned" };
+    quoteByTime.set(candle.t, candle);
+  }
+  const candles = [];
+  for (const token of tokenCandles) {
+    const quote = quoteByTime.get(token.t);
+    if (!quote) return { ok: false, reason: "quote candle timestamps are misaligned" };
+    const quoteOpen = Number(quote.o);
+    const quoteHigh = Number(quote.h);
+    const quoteLow = Number(quote.l);
+    const quoteClose = Number(quote.c);
+    if (![quoteOpen, quoteHigh, quoteLow, quoteClose].every(price => price > 0)) {
+      return { ok: false, reason: "quote candle price is invalid" };
+    }
+    const open = token.o / quoteOpen;
+    const close = token.c / quoteClose;
+    const candidates = [open, close, token.h / quoteLow, token.l / quoteHigh];
+    if (candidates.some(price => !Number.isFinite(price) || price <= 0) || !Number.isFinite(token.v) || token.v < 0) {
+      return { ok: false, reason: "quote candle price is invalid" };
+    }
+    candles.push({
+      t: token.t,
+      o: open,
+      h: Math.max(...candidates),
+      l: Math.min(...candidates),
+      c: close,
+      v: token.v,
+      priceDenomination: "quote",
+      volumeDenomination: "usd",
+    });
+  }
+  return { ok: true, candles };
+}
+
+export async function fetchQuoteGmgn1m(args) {
+  const { rules, mint } = args;
+  const budget = args.budget || createRequestBudget(rules);
+  const shared = { ...args, budget };
+  const token = await fetchGmgn1m(shared);
+  if (!token.ok) return token;
+  if (mint === rules.quoteMint) {
+    return {
+      ok: true,
+      candles: token.candles.map(candle => ({ ...candle, priceDenomination: "quote", volumeDenomination: "usd" })),
+      priceDenomination: "quote",
+    };
+  }
+  const quote = await fetchGmgn1m({ ...shared, mint: rules.quoteMint });
+  if (!quote.ok) return quote;
+  const converted = toQuoteCandles(token.candles, quote.candles);
+  if (!converted.ok) return converted;
+  return { ...converted, priceDenomination: "quote" };
+}
+
 export function gmgnMarketData(rules, deps = {}) {
   const budget = deps.budget || createRequestBudget(rules);
   return {
@@ -163,9 +228,17 @@ export function gmgnMarketData(rules, deps = {}) {
       const to = window.to;
       const from = window.from;
       if (to == null || from == null) return { ok: false, reason: "gmgn window is incomplete" };
-      const series = await fetchGmgn1m({ ...deps, rules, mint, from, to, budget, apiKey });
+      const series = await fetchQuoteGmgn1m({ ...deps, rules, mint, from, to, budget, apiKey });
       if (!series.ok) return series;
-      return { ok: true, closed1m: series.candles, closed5m: completed5m(series.candles) };
+      return {
+        ok: true,
+        priceDenomination: "quote",
+        quoteMint: rules.quoteMint,
+        quoteSymbol: rules.quoteSymbol,
+        volumeDenomination: "usd",
+        closed1m: series.candles,
+        closed5m: completed5m(series.candles),
+      };
     },
   };
 }
@@ -191,6 +264,8 @@ export function completed5m(closed1m) {
       l: Math.min(...ordered.map(candle => candle.l)),
       c: ordered[4].c,
       v: ordered.reduce((sum, candle) => sum + candle.v, 0),
+      priceDenomination: ordered[0].priceDenomination,
+      volumeDenomination: ordered[0].volumeDenomination,
     });
   }
   return out;
