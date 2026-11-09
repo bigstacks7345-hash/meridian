@@ -22,12 +22,12 @@ The app is the standalone wallet-triggered bot. There is no legacy mode or LLM d
 - `performance.js`: local performance accounting and pool cooldown updates. Uses the existing `lessons.json` schema, preserving historical data.
 - `pool-memory.js`, `token-blacklist.js`, `dev-blocklist.js`: local history and safety filters.
 - `smart-wallets.js`: local LP watchlist CRUD.
-- `telegram.js`: outbound notifications, plus an admin console in `standalone/telegram-admin.js` when `TELEGRAM_ALLOWED_USER_IDS` is set. That console can hot-switch `shadowMode` and can import or display `WALLET_PRIVATE_KEY`.
+- `telegram.js`: outbound notifications only. `startAdmin` does not poll or register commands, so it cannot arm trading, import a key, or display a key.
 
 ## Invariants
 
 - Entries require fresh wallet convergence. Do not reintroduce broad scans or expose a bypass through the CLI.
-- `shadowMode` defaults on (`shadowMode !== false`) and forces `DRY_RUN=true`. Submit paths stay blocked while the in-memory shadow flag is on. With shadow off, only the exact env string `DRY_RUN=true` blocks submits.
+- This build forces shadow mode and `DRY_RUN=true`. `transactionsAreDryRun()` stays true. Do not load `walletKey` into `WALLET_PRIVATE_KEY`.
 - Missing data must not be interpreted as empty positions or spendable funds.
 - Keep entry screening independent of exit polling. Serialize wallet mutations through the existing queue.
 - Preserve `before_submit` and `on_prepared` hooks and persisted attempt recovery.

@@ -10,7 +10,7 @@ Standalone wallet-triggered Meteora DLMM bot for Solana. It waits for fresh LP e
 4. Recheck exposure, price movement, balances, and transaction safety before entry. Failed screening waits within a bounded deadline.
 5. Monitor positions independently and execute rule-based closes and fee claims.
 
-With no `user-config.json`, or with `shadowMode` omitted, the process stays in shadow mode. Shadow mode forces `DRY_RUN` to the exact string `true` and blocks deploy, claim, close, and swap submits. It records entry proposals. `close`, `claim`, and `swap` return before any signature or broadcast. A deploy that passes the local gates still reads pool data before that return. Read [user-config.example.json](user-config.example.json) for supported settings. Monitoring and screening implementation details are in [standalone/](standalone/).
+This build stays in shadow mode and forces `DRY_RUN=true` even if a config file says otherwise. Close, claim, and swap return before any signature or broadcast. Owner entries are recorded as shadow proposals. Read [user-config.example.json](user-config.example.json) for the strategy parameters.
 
 ## Setup
 
@@ -43,9 +43,11 @@ Supported infrastructure overrides:
 
 Balances use standard RPC, including SPL Token and Token-2022. PnL defaults to Meteora portfolio and position APIs, with an on-chain fallback. Jupiter supplies prices, token data, and swaps. Live swaps attach the built-in referral unless those referral variables override it.
 
-`npm start` and `npm run pm2:start` do not themselves set `DRY_RUN`. `npm run dev` does. File edits to `user-config.json` apply on restart. The admin console, once `TELEGRAM_ALLOWED_USER_IDS` is set, can change thresholds immediately, switch `shadowMode`, and import or display the private key. Switching shadow off deletes the in-process `DRY_RUN` lock unless the `.env` file itself contains `DRY_RUN=true`.
+This build forces shadow mode and `DRY_RUN=true`. `npm run safety` stays at `"willSubmit": false`. Telegram notifications can still be sent. The admin console does not start, so it cannot arm trading, import a key, or display a key.
 
-Submits are blocked while `shadowMode` is anything other than `false`, and also while `DRY_RUN` is exactly `true`. `false`, `1`, and `TRUE` do not block. To enable live trading, review thresholds, the wallet list, and shadow proposals, set `shadowMode` to `false`, remove any `DRY_RUN=true` override, restart, and confirm `npm run safety` prints `"willSubmit": true` before leaving the process running.
+The owner parameters live in `ownerStrategy` inside [user-config.example.json](user-config.example.json). The volume profile is a TradingView visible-range VPVR equivalent: 24 rows over the 24h high/low of 1-minute bars, up/down split by candle direction, and TradingView's one-row value-area rule. It is computed once at a shadow entry and locked. `candleProvider` defaults to `none` and fails closed. `gmgn` paginates `/v1/market/token_kline`, and `birdeye` is a stub for `/defi/v3/ohlcv`.
+
+`npm run shadow-replay` runs one offline scenario and does not sign or broadcast.
 
 ## Commands
 

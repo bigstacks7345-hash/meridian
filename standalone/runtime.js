@@ -21,6 +21,8 @@ import { getTrackedPositions, confirmPeak, updatePnlAndCheckExits, registerExitS
 import { recordPositionSnapshot } from "../pool-memory.js";
 import { getDeterministicCloseRule, computeBinsBelow } from "../exit-rules.js";
 import { startAdmin } from "./telegram-admin.js";
+import { planShadowEntry, stepShadowBook } from "../strategy/shadow.js";
+import { createMarketData } from "../strategy/market-data.js";
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -85,7 +87,63 @@ async function pursueSignal(signal) {
 
 // One entry attempt. Returns null when the signal is finished (entered,
 // terminal rejection, or fatal condition), or a reason string to retry.
+function watchedWallets() {
+  return {
+    wallets: config.ownerStrategy.wallets.map((address, index) => ({
+      address,
+      name: `watch-${index + 1}`,
+      type: "lp",
+    })),
+  };
+}
+
 async function attemptEntry(signal) {
+  if (config.ownerStrategy.enabled) return attemptOwnerEntry(signal);
+  return attemptLegacyEntry(signal);
+}
+
+async function attemptOwnerEntry(signal) {
+  const rules = config.ownerStrategy;
+  const book = Array.isArray(store.data.shadowBook) ? store.data.shadowBook : [];
+  const now = Date.now();
+  let snapshot;
+  try {
+    snapshot = await createMarketData(rules).snapshot(signal.mint);
+  } catch (error) {
+    return `market data error: ${error.message}`;
+  }
+  const decision = planShadowEntry({ signal, snapshot, book, rules, now });
+  if (!decision.ok) {
+    if (decision.terminal) {
+      finishSignal(store, signal, decision.reason);
+      return null;
+    }
+    return decision.reason;
+  }
+  store.data.shadowBook = [...book, decision.proposal];
+  store.data.attempts[signal.mint] = {
+    at: now,
+    mint: signal.mint,
+    pool: decision.proposal.poolAddress,
+    wallets: decision.proposal.wallets,
+    status: "proposed",
+    failures: 0,
+    position: decision.proposal.id,
+    txs: [],
+    shadow: true,
+  };
+  store.save();
+  finishSignal(store, signal, "shadow proposal recorded");
+  log("entry", `[SHADOW] Would open ${decision.proposal.totalSol} SOL (${decision.proposal.legs.map(leg => `${leg.strategy} ${leg.amountSol}`).join(" + ")}) on ${signal.mint.slice(0, 8)}; nothing submitted`);
+  void notify(`🕯️ Shadow proposal: ${decision.proposal.totalSol} SOL split ${decision.proposal.legs.map(leg => `${leg.amountSol} ${leg.strategy}`).join(" + ")} on ${signal.mint.slice(0, 8)}. Not submitted.`);
+  return null;
+}
+
+export function reviewShadowBook(book, tick) {
+  return stepShadowBook(book, tick, config.ownerStrategy);
+}
+
+async function attemptLegacyEntry(signal) {
   const mint = signal.mint;
   const attempt = store.data.attempts[mint];
   // One attempt chain per mint; bounded retries only for temporary failures.
@@ -345,7 +403,7 @@ export async function startStandalone() {
     }
   }
 
-  monitor = new WalletMonitor(store, config.standalone, { onSignal });
+  monitor = new WalletMonitor(store, config.standalone, { onSignal, wallets: watchedWallets });
   const modeLabel = transactionsAreDryRun()
     ? (config.standalone.shadow ? "SHADOW MODE (proposals recorded, nothing submitted)" : "DRY RUN (shadow is off, but DRY_RUN=true still blocks submits)")
     : "LIVE MODE";

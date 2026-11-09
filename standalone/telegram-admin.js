@@ -563,13 +563,7 @@ const adminContext = { monitor: null, activeSignals: null };
 // Exposed for the menu-schema tests in test/cleanup.test.js.
 export const _test = { SECTIONS, byKey, editHint, validate, sectionMenu, fmtValue };
 
-export function startAdmin({ monitor = null, activeSignals = null } = {}) {
-  adminContext.monitor = monitor;
-  adminContext.activeSignals = activeSignals;
-  const stop = startAdminPolling(async ({ message, callback }) => {
-    if (callback) await handleCallback(callback);
-    else if (message) await handleText(message.text);
-  });
-  void setBotCommands(ADMIN_COMMANDS); // register in Telegram clients on every boot
-  return stop;
+export function startAdmin() {
+  log("telegram", "Admin console disabled. Notifications only; arming, key import, and key display are unavailable.");
+  return () => {};
 }

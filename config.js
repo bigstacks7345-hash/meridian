@@ -1,5 +1,6 @@
 import fs from "fs";
 import { REPO_ROOT, repoPath } from "./repo-root.js";
+import { OWNER_STRATEGY } from "./strategy/defaults.js";
 
 export { REPO_ROOT, repoPath };
 
@@ -28,10 +29,17 @@ const strategyDefaultBinsBelow = Math.max(
 );
 
 // Apply wallet/RPC from user-config if not already in env
-if (u.rpcUrl)    process.env.RPC_URL            ||= u.rpcUrl;
-if (u.walletKey) process.env.WALLET_PRIVATE_KEY ||= u.walletKey;
+if (u.rpcUrl) process.env.RPC_URL ||= u.rpcUrl;
 if (u.dryRun !== undefined) process.env.DRY_RUN ||= String(u.dryRun);
 if (u.telegramChatId) process.env.TELEGRAM_CHAT_ID ||= String(u.telegramChatId);
+
+function mergeOwnerStrategy(overrides) {
+  const source = overrides && typeof overrides === "object" ? overrides : {};
+  const merged = { ...OWNER_STRATEGY, ...source };
+  if (!Array.isArray(source.wallets) || source.wallets.length === 0) merged.wallets = OWNER_STRATEGY.wallets;
+  return merged;
+}
+const ownerStrategy = mergeOwnerStrategy(u.ownerStrategy);
 
 function nonEmptyString(...values) {
   for (const value of values) {
@@ -47,42 +55,42 @@ export const config = {
   // The LLM/server-driven flow lives on the `legacy` branch.
   // Shadow mode never submits transactions.
   standalone: {
-    shadow: u.shadowMode !== false,
+    shadow: true,
     monitorRpcUrl: nonEmptyString(process.env.MONITOR_RPC_URL, u.monitorRpcUrl, process.env.RPC_URL),
     monitorWsUrl: nonEmptyString(process.env.MONITOR_WS_URL, u.monitorWsUrl),
     balanceRpcUrl: nonEmptyString(process.env.BALANCE_RPC_URL, u.balanceRpcUrl, process.env.RPC_URL),
     fallbackRpcUrl: nonEmptyString(process.env.FALLBACK_RPC_URL, u.fallbackRpcUrl),
     walletAddress: nonEmptyString(process.env.WALLET_ADDRESS, u.walletAddress),
-    walletThreshold: u.walletThreshold ?? 2,
-    windowSec: u.walletWindowSec ?? 120,
+    walletThreshold: ownerStrategy.walletThreshold,
+    windowSec: ownerStrategy.windowSec,
     screeningDeadlineSec: u.screeningDeadlineSec ?? 120,
     retrySec: u.screeningRetrySec ?? 15,
     reconcileSec: u.walletReconcileSec ?? 30,
     minDepositSol: u.minSmartWalletDepositSol ?? 0.1,
     maxPriceMovePct: u.maxEntryPriceMovePct ?? 5,
-    cooldownSec: u.walletSignalCooldownSec ?? 300,
+    cooldownSec: ownerStrategy.signalCooldownSec,
     maxPendingTransactions: u.maxPendingWalletTransactions ?? 1000,
     walletGroups: u.walletGroups ?? {},
   },
   // ─── Risk Limits ─────────────────────────
   risk: {
-    maxPositions:    u.maxPositions    ?? 3,
-    maxDeployAmount: u.maxDeployAmount ?? 50,
+    maxPositions:    u.maxPositions    ?? ownerStrategy.maxOpenPositions,
+    maxDeployAmount: u.maxDeployAmount ?? ownerStrategy.sizeSol,
   },
 
   // ─── Pool Screening Thresholds ───────────
   screening: {
     minFeeActiveTvlRatio: u.minFeeActiveTvlRatio ?? 0.05,
-    minTvl:            u.minTvl            ?? 10_000,
-    maxTvl:            u.maxTvl !== undefined ? u.maxTvl : 150_000,
+    minTvl:            u.minTvl            ?? ownerStrategy.liquidityMinUsd,
+    maxTvl:            u.maxTvl !== undefined ? u.maxTvl : ownerStrategy.liquidityMaxUsd,
     minVolume:         u.minVolume         ?? 500,
     minOrganic:        u.minOrganic        ?? 60,
     minQuoteOrganic:   u.minQuoteOrganic   ?? 60,
-    minHolders:        u.minHolders        ?? 500,
-    minMcap:           u.minMcap           ?? 150_000,
-    maxMcap:           u.maxMcap           ?? 10_000_000,
-    minBinStep:        u.minBinStep        ?? 80,
-    maxBinStep:        u.maxBinStep        ?? 125,
+    minHolders:        u.minHolders        ?? ownerStrategy.holdersMin,
+    minMcap:           u.minMcap           ?? ownerStrategy.mcapMinUsd,
+    maxMcap:           u.maxMcap === undefined ? ownerStrategy.mcapMaxUsd : u.maxMcap,
+    minBinStep:        u.minBinStep        ?? ownerStrategy.binStepMin,
+    maxBinStep:        u.maxBinStep        ?? ownerStrategy.binStepMax,
     timeframe:         u.timeframe         ?? "5m",
     minTokenFeesSol:   u.minTokenFeesSol   ?? 30,  // global fees paid (priority+jito tips). below = bundled/scam
     maxBotHoldersPct:  u.maxBotHoldersPct  ?? 30,  // max bot holder addresses % (Jupiter audit)
@@ -108,18 +116,18 @@ export const config = {
     repeatDeployCooldownHours: u.repeatDeployCooldownHours ?? 12,
     repeatDeployCooldownScope: u.repeatDeployCooldownScope ?? "token", // pool | token | both
     repeatDeployCooldownMinFeeEarnedPct: u.repeatDeployCooldownMinFeeEarnedPct ?? u.repeatDeployCooldownMinFeeYieldPct ?? 0,
-    stopLossPct:           u.stopLossPct           ?? u.emergencyPriceDropPct ?? -50,
-    takeProfitPct:         u.takeProfitPct         ?? u.takeProfitFeePct ?? 5,
+    stopLossPct:           u.stopLossPct           ?? u.emergencyPriceDropPct ?? ownerStrategy.stopLossPct,
+    takeProfitPct:         u.takeProfitPct         ?? u.takeProfitFeePct ?? ownerStrategy.hardTakeProfitPct,
     minFeePerTvl24h:       u.minFeePerTvl24h       ?? 7,
     minAgeBeforeYieldCheck: u.minAgeBeforeYieldCheck ?? 60, // minutes before low yield can trigger close
     minSolToOpen:          u.minSolToOpen          ?? 0.55,
-    deployAmountSol:       u.deployAmountSol       ?? 0.5,
+    deployAmountSol:       u.deployAmountSol       ?? ownerStrategy.sizeSol,
     gasReserve:            u.gasReserve            ?? 0.2,
     positionSizePct:       u.positionSizePct       ?? 0.35,
     // Trailing take-profit
     trailingTakeProfit:    u.trailingTakeProfit    ?? true,
-    trailingTriggerPct:    u.trailingTriggerPct    ?? 3,    // activate trailing at X% PnL
-    trailingDropPct:       u.trailingDropPct       ?? 1.5,  // close when drops X% from peak
+    trailingTriggerPct:    u.trailingTriggerPct    ?? ownerStrategy.trailActivatePct,
+    trailingDropPct:       u.trailingDropPct       ?? ownerStrategy.trailDistancePct,
     pnlSanityMaxDiffPct:   u.pnlSanityMaxDiffPct   ?? 5,    // max allowed diff between reported and derived pnl % before ignoring a tick
     // SOL mode — positions, PnL, and balances reported in SOL instead of USD
     solMode:               u.solMode               ?? false,
@@ -161,6 +169,8 @@ export const config = {
     confirmTicks: Number(u.pnlConfirmTicks ?? 2),
   },
 
+  ownerStrategy,
+
   jupiter: {
     // Internal Jupiter Ultra settings; override by env only, do not expose in user-config.
     apiKey: process.env.JUPITER_API_KEY ?? "",
@@ -180,7 +190,7 @@ if (config.standalone.shadow) process.env.DRY_RUN = "true";
 // Submit gates must follow the in-memory shadow flag. DRY_RUN is an extra lock
 // only when it is exactly the string "true"; "1", "TRUE", and "false" do not disarm.
 export function transactionsAreDryRun() {
-  return config.standalone.shadow || process.env.DRY_RUN === "true";
+  return true;
 }
 
 /**

@@ -19,22 +19,21 @@ function run(args, { env = {}, timeout = 20_000 } = {}) {
   return result;
 }
 
-test('fresh checkout does not submit, and only the exact DRY_RUN string disarms', () => {
+test('this build cannot be armed and does not load a config private key', () => {
   assert.equal(fs.existsSync(path.join(REPO_ROOT, 'user-config.json')), false);
+  const source = fs.readFileSync(path.join(REPO_ROOT, 'config.js'), 'utf8');
+  assert.doesNotMatch(source, /WALLET_PRIVATE_KEY\s*\|\|=/);
   const result = run(['--input-type=module', '-e', `
     delete process.env.DRY_RUN;
+    delete process.env.WALLET_PRIVATE_KEY;
     const { config, transactionsAreDryRun } = await import('./config.js');
-    if (config.standalone.shadow !== true) throw new Error('missing config must stay in shadow');
-    if (process.env.DRY_RUN !== 'true') throw new Error('shadow did not force DRY_RUN=true');
-    process.env.DRY_RUN = 'false';
-    if (!transactionsAreDryRun()) throw new Error('shadow must keep submits blocked after DRY_RUN is cleared');
-    for (const value of ['false', '1', 'TRUE', 'yes', '']) {
-      config.standalone.shadow = false;
+    if (config.standalone.shadow !== true) throw new Error('build must stay in shadow');
+    if (process.env.DRY_RUN !== 'true') throw new Error('DRY_RUN was not forced');
+    config.standalone.shadow = false;
+    for (const value of ['false', '1', 'TRUE', 'yes', '', 'true']) {
       process.env.DRY_RUN = value;
-      if (transactionsAreDryRun()) throw new Error('value should not disarm: ' + JSON.stringify(value));
+      if (!transactionsAreDryRun()) throw new Error('submit gate opened for ' + JSON.stringify(value));
     }
-    process.env.DRY_RUN = 'true';
-    if (!transactionsAreDryRun()) throw new Error('exact true must block even with shadow off');
     console.log('arming-ok');
   `]);
   assert.equal(result.status, 0, result.stderr + result.stdout);
