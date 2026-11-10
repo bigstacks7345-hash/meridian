@@ -127,6 +127,7 @@ test("GMGN pagination walks backwards, paces a 5-credit window, and stops on 429
     from,
     to,
     apiKey: "test-key",
+    deadline: 1,
     now: () => 0,
     sleep: () => Promise.resolve(),
     fetchImpl: async () => {

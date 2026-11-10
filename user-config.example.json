@@ -13,6 +13,16 @@
   "walletWindowSec": 120,
   "screeningDeadlineSec": 120,
   "screeningRetrySec": 15,
+  "slowRetrySec": 60,
+  "slowRetryAfterSec": 300,
+  "maxActiveSignals": 5,
+  "externalSignals": {
+    "fabriq": {
+      "enabled": true,
+      "pollSec": 20,
+      "channel": "fabriqalert"
+    }
+  },
   "walletReconcileSec": 30,
   "minSmartWalletDepositSol": 0.1,
   "maxEntryPriceMovePct": 5,

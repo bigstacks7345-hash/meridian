@@ -16,7 +16,7 @@
     "pm2:logs": "pm2 logs meridian-shadow --lines 100",
     "dev": "DRY_RUN=true node index.js",
     "safety": "node scripts/safety-status.js",
-    "test": "MERIDIAN_USER_CONFIG=none npm run test:syntax && MERIDIAN_USER_CONFIG=none npm run test:standalone && MERIDIAN_USER_CONFIG=none node --test test/cleanup.test.js test/dry-run.test.js test/vpvr.test.js test/owner-strategy.test.js test/runtime-market.test.js",
+    "test": "MERIDIAN_USER_CONFIG=none npm run test:syntax && MERIDIAN_USER_CONFIG=none npm run test:standalone && MERIDIAN_USER_CONFIG=none node --test test/cleanup.test.js test/dry-run.test.js test/vpvr.test.js test/owner-strategy.test.js test/runtime-market.test.js test/runtime-signal.test.js test/fabriq.test.js",
     "shadow-replay": "MERIDIAN_USER_CONFIG=none node scripts/shadow-replay.js",
     "test:syntax": "node scripts/check-syntax.js",
     "postinstall": "node scripts/patch-anchor.js",

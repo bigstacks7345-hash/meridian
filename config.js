@@ -16,6 +16,25 @@ function loadUserConfig() {
 const u = loadUserConfig();
 export const MIN_SAFE_BINS_BELOW = 35;
 
+function screeningDeadlineSec(value) {
+  if (value === undefined) return 120;
+  if (value === null || value === 0 || value === "0") return null;
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function fabriqConfig(raw = {}) {
+  const channel = nonEmptyString(raw.channel) || "fabriqalert";
+  const pollSec = Number(raw.pollSec);
+  return {
+    enabled: raw.enabled === undefined ? true : Boolean(raw.enabled),
+    pollSec: Number.isFinite(pollSec) && pollSec > 0 ? pollSec : 20,
+    channel,
+    url: nonEmptyString(raw.url) || `https://t.me/s/${channel}`,
+    userAgent: "MeridianShadow/1.0 (watch-only; public Telegram preview)",
+  };
+}
+
 function numericConfig(value) {
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
@@ -68,8 +87,11 @@ export const config = {
     walletAddress: nonEmptyString(process.env.WALLET_ADDRESS, u.walletAddress),
     walletThreshold: ownerStrategy.walletThreshold,
     windowSec: ownerStrategy.windowSec,
-    screeningDeadlineSec: u.screeningDeadlineSec ?? 120,
+    screeningDeadlineSec: screeningDeadlineSec(u.screeningDeadlineSec),
     retrySec: u.screeningRetrySec ?? 15,
+    slowRetrySec: u.slowRetrySec ?? 60,
+    slowRetryAfterSec: u.slowRetryAfterSec ?? 300,
+    maxActiveSignals: u.maxActiveSignals ?? 5,
     reconcileSec: u.walletReconcileSec ?? 30,
     minDepositSol: u.minSmartWalletDepositSol ?? 0.1,
     maxPriceMovePct: u.maxEntryPriceMovePct ?? 5,
@@ -175,6 +197,11 @@ export const config = {
   },
 
   ownerStrategy,
+
+  // Fabriq is watch-only context. It never counts toward wallet convergence.
+  externalSignals: {
+    fabriq: fabriqConfig(u.externalSignals?.fabriq),
+  },
 
   jupiter: {
     // Internal Jupiter Ultra settings; override by env only, do not expose in user-config.

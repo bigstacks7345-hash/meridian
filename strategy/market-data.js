@@ -99,6 +99,10 @@ export function headerValue(response, name) {
   return found ? headers[found] : null;
 }
 
+export function gmgnRetryWithinDeadline(deadline, resetAt) {
+  return deadline == null || resetAt <= deadline;
+}
+
 export function parseGmgnResetAt(response, body, now) {
   const retryAfter = headerValue(response, "retry-after");
   if (retryAfter != null && retryAfter !== "") {
@@ -143,6 +147,7 @@ export async function fetchGmgn1m({
   const pageMs = rules.gmgnPageBars * 60_000;
   const cost = rules.gmgnCandleCreditCost;
   let cursor = to;
+  let rateRetries = 0;
   const collected = [];
   while (cursor > from) {
     const pageFrom = Math.max(from, cursor - pageMs);
@@ -166,7 +171,8 @@ export async function fetchGmgn1m({
       const body = await response.json?.().catch(() => null);
       const resetAt = parseGmgnResetAt(response, body, now()) ?? now() + (rules.gmgnWindowMs ?? 1000);
       if (gate) gate.pausedUntil = Math.max(gate.pausedUntil, resetAt);
-      if (deadline != null && resetAt <= deadline) {
+      if (gmgnRetryWithinDeadline(deadline, resetAt) && rateRetries < 3) {
+        rateRetries += 1;
         await sleep(Math.max(0, resetAt - now()));
         continue;
       }
@@ -176,6 +182,7 @@ export async function fetchGmgn1m({
     const parsed = parseGmgnKlines(await response.json(), rules.gmgnUsdField);
     if (!parsed.ok) return parsed;
     collected.push(...parsed.candles);
+    rateRetries = 0;
     cursor = pageFrom;
   }
   const merged = dedupeCandles(collected.filter(candle => candle.t >= from && candle.t < to));
@@ -273,7 +280,7 @@ export function parseTokenCreatedAt(body) {
   return { ok: true, createdAt: n < 1e12 ? n * 1000 : n };
 }
 
-export async function fetchTokenCreatedAt({ rules, mint, fetchImpl, sleep = () => Promise.resolve(), now = Date.now, budget, apiKey = "", gate = null, cache = null, deadline = null }) {
+export async function fetchTokenCreatedAt({ rules, mint, fetchImpl, sleep = () => Promise.resolve(), now = Date.now, budget, apiKey = "", gate = null, cache = null, deadline = null, rateRetries = 0 }) {
   const cacheKey = `created:${mint}`;
   const cached = cache?.get(cacheKey);
   if (cached && now() - cached.at < (rules.candleCacheMs ?? 60_000)) return cached.value;
@@ -298,9 +305,9 @@ export async function fetchTokenCreatedAt({ rules, mint, fetchImpl, sleep = () =
     const body = await response.json?.().catch(() => null);
     const resetAt = parseGmgnResetAt(response, body, now()) ?? now() + (rules.gmgnWindowMs ?? 1000);
     if (gate) gate.pausedUntil = Math.max(gate.pausedUntil, resetAt);
-    if (deadline != null && resetAt <= deadline) {
+    if (gmgnRetryWithinDeadline(deadline, resetAt) && rateRetries < 3) {
       await sleep(Math.max(0, resetAt - now()));
-      return fetchTokenCreatedAt({ rules, mint, fetchImpl, sleep, now, budget, apiKey, gate, cache, deadline });
+      return fetchTokenCreatedAt({ rules, mint, fetchImpl, sleep, now, budget, apiKey, gate, cache, deadline, rateRetries: rateRetries + 1 });
     }
     return { ok: false, reason: "gmgn 429; paused until reset" };
   }

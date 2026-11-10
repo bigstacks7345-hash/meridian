@@ -10,7 +10,8 @@ import { config, computeDeployAmount, transactionsAreDryRun } from "../config.js
 import { log } from "../logger.js";
 import { repoPath } from "../repo-root.js";
 import { sendMessage as tgSend, isEnabled as tgEnabled } from "../telegram.js";
-import { MonitorStore, finishSignal } from "./store.js";
+import { MonitorStore, dropUnfinishedSignals, finishSignal, recordFabriqAlerts } from "./store.js";
+import { createFabriqPoller, withFabriqContext } from "./fabriq.js";
 import { WalletMonitor } from "./monitor.js";
 import { screenMint, poolDetail } from "./screening.js";
 import { exposureStillPresent } from "./events.js";
@@ -30,57 +31,158 @@ let store = null;
 let monitor = null;
 let lockPath = null;
 let stopAdmin = null;
+let stopFabriq = () => {};
+let notifySink = null;
 let shuttingDown = false;
 let manageBusy = false;
 let pollBusy = false;
-let pursuing = false;
 const timers = {};
 const signalQueue = [];
+const signalInflight = new Set();
+let idleWaiters = [];
+const defaultPursuitDeps = {
+  sleep,
+  exposureStillPresent,
+  createMarketData: deadline => createOwnerMarketData({ deadline }),
+};
+const pursuitDeps = { ...defaultPursuitDeps };
+
+export function resetPursuitDeps() {
+  Object.assign(pursuitDeps, defaultPursuitDeps);
+}
+
+function signalOptions() {
+  return config.standalone;
+}
+
+function endSignal(signal, reason, now = Date.now()) {
+  finishSignal(store, signal, reason, signalOptions(), now);
+}
+
+function signalStillOpen(signal, now = Date.now()) {
+  return !signal.done && (signal.deadline == null || now < signal.deadline);
+}
+
+function nextRetryMs(signal, now = Date.now()) {
+  const age = now - (signal.createdAt || now);
+  const fast = Math.max(0, Number(config.standalone.retrySec ?? 15)) * 1000;
+  const slow = Math.max(fast, Number(config.standalone.slowRetrySec ?? 60) * 1000);
+  const after = Math.max(0, Number(config.standalone.slowRetryAfterSec ?? 300)) * 1000;
+  let wait = age < after ? fast : slow;
+  if (signal.deadline != null) wait = Math.min(wait, Math.max(0, signal.deadline - now));
+  else if (wait === 0) wait = 1000;
+  return wait;
+}
+
+export function setPursuitDeps(next = {}) {
+  Object.assign(pursuitDeps, next);
+}
+
+export function useRuntimeStore(next) {
+  store = next;
+}
+
+export function signalPursuitSettled() {
+  if (signalInflight.size === 0 && signalQueue.length === 0) return Promise.resolve();
+  return new Promise(resolve => { idleWaiters.push(resolve); });
+}
+
+export function enqueueSignal(signal) {
+  onSignal(signal);
+  return signalPursuitSettled();
+}
+
+function noteIdle() {
+  if (signalInflight.size === 0 && signalQueue.length === 0 && idleWaiters.length) {
+    const waiters = idleWaiters;
+    idleWaiters = [];
+    for (const resolve of waiters) resolve();
+  }
+}
+
+export function setNotifySink(fn) {
+  notifySink = fn;
+}
 
 async function notify(text) {
+  try { notifySink?.(text); } catch { /* the test sink must not affect the daemon */ }
   try { if (tgEnabled()) await tgSend(text); } catch { /* notifications are best-effort */ }
+}
+
+// Logs and stores Fabriq alerts. Does not enqueue a signal or read the market.
+export function ingestFabriqAlerts(alerts, now = Date.now()) {
+  if (!store) return [];
+  const added = recordFabriqAlerts(store, alerts, now);
+  for (const alert of added) {
+    log("fabriq", `HOT ${alert.symbol ?? "?"} ${alert.mint.slice(0, 8)} score=${alert.score ?? "?"} 5m=${alert.volume5mLabel ?? "?"} pool=${alert.pool ? alert.pool.slice(0, 8) : "n/a"} id=${alert.id}`);
+  }
+  return added;
 }
 
 // ─── Signal pursuit ──────────────────────────────────────────────────────────
 
 function onSignal(signal) {
+  if (signal.done) return;
+  if (signalInflight.has(signal.mint) || signalQueue.some(queued => queued.mint === signal.mint)) return;
   signalQueue.push(signal);
-  void drainSignals();
+  drainSignals();
 }
 
-async function drainSignals() {
-  if (pursuing) return;
-  pursuing = true;
-  try {
-    while (signalQueue.length && !shuttingDown) {
-      const signal = signalQueue.shift();
-      try {
-        await pursueSignal(signal);
-      } catch (e) {
-        finishSignal(store, signal, `error: ${e.message}`);
-        log("signal_error", `Signal ${signal.mint.slice(0, 8)} aborted: ${e.message}`);
-      }
-    }
-  } finally {
-    pursuing = false;
+export function drainSignals() {
+  const limit = Math.max(1, Number(config.standalone.maxActiveSignals ?? 5));
+  while (!shuttingDown && signalInflight.size < limit && signalQueue.length) {
+    const signal = signalQueue.shift();
+    if (!signal || signal.done || signalInflight.has(signal.mint)) continue;
+    signalInflight.add(signal.mint);
+    void pursueSignal(signal).catch(error => {
+      try { endSignal(signal, `error: ${error.message}`); }
+      catch (finishError) { log("signal_error", `Signal finish failed: ${finishError.message}`); }
+      log("signal_error", `Signal ${signal.mint.slice(0, 8)} aborted: ${error.message}`);
+    }).finally(() => {
+      signalInflight.delete(signal.mint);
+      drainSignals();
+      noteIdle();
+    });
   }
+  noteIdle();
+  return signalPursuitSettled();
 }
 
-// Screen and enter within the signal deadline. Terminal outcomes finish the
-// signal; temporary failures retry every retrySec until the deadline expires.
-async function pursueSignal(signal) {
+async function triggeringExposureGone(signal) {
+  const events = signal.events || [];
+  if (!events.length) return false;
+  let present = 0;
+  for (const event of events) {
+    let still = false;
+    try { still = await pursuitDeps.exposureStillPresent(event); }
+    catch { return false; }
+    if (still) present++;
+  }
+  return present < config.standalone.walletThreshold;
+}
+
+// Screen and enter until the deadline, or indefinitely when deadline is null.
+// Temporary failures back off. A terminal result or departed wallets ends it.
+export async function pursueSignal(signal) {
   const wallets = signal.events.map(e => `${e.wallet.slice(0, 6)}(◎${e.depositSol.toFixed(1)})`).join(", ");
-  log("signal", `Convergence on ${signal.mint.slice(0, 8)}: ${signal.events.length} wallets [${wallets}] — screening with ${config.standalone.screeningDeadlineSec}s deadline`);
+  const deadlineLabel = signal.deadline == null ? "no deadline" : `${config.standalone.screeningDeadlineSec}s deadline`;
+  log("signal", `Convergence on ${signal.mint.slice(0, 8)}: ${signal.events.length} wallets [${wallets}] — screening with ${deadlineLabel}`);
+  void notify(withFabriqContext(store, signal.mint, `👀 Signal: ${signal.events.length} watched wallets on ${signal.mint.slice(0, 8)}`));
   let lastReason = "no attempt";
-  while (!shuttingDown && !signal.done && Date.now() < signal.deadline) {
+  while (!shuttingDown && signalStillOpen(signal)) {
+    if (await triggeringExposureGone(signal)) {
+      endSignal(signal, "triggering wallets left the token");
+      log("signal", `Signal ${signal.mint.slice(0, 8)} ended: triggering wallets left the token`);
+      return;
+    }
     const reason = await attemptEntry(signal);
     if (reason == null) return;
     lastReason = reason;
-    const wait = Math.min(config.standalone.retrySec * 1000, signal.deadline - Date.now());
-    if (wait > 0) await sleep(wait);
+    const wait = nextRetryMs(signal);
+    if (wait > 0) await pursuitDeps.sleep(wait);
   }
   if (!signal.done) {
-    finishSignal(store, signal, lastReason);
+    endSignal(signal, lastReason);
     log("signal", `Signal ${signal.mint.slice(0, 8)} expired: ${lastReason}`);
   }
 }
@@ -133,7 +235,7 @@ async function attemptOwnerEntry(signal) {
   const window = ownerSnapshotWindow(now, rules);
   let snapshot;
   try {
-    snapshot = await createOwnerMarketData({ deadline: signal.deadline }).snapshot(signal.mint, {
+    snapshot = await pursuitDeps.createMarketData(signal.deadline).snapshot(signal.mint, {
       ...window,
       deadline: signal.deadline,
     });
@@ -144,7 +246,7 @@ async function attemptOwnerEntry(signal) {
   if (!decision.ok) {
     log("entry", `shadow skip ${signal.mint.slice(0, 8)}: ${decision.reason}`);
     if (decision.terminal) {
-      finishSignal(store, signal, decision.reason);
+      endSignal(signal, decision.reason);
       return null;
     }
     return decision.reason;
@@ -162,9 +264,9 @@ async function attemptOwnerEntry(signal) {
     shadow: true,
   };
   store.save();
-  finishSignal(store, signal, "shadow proposal recorded");
+  endSignal(signal, "shadow proposal recorded");
   log("entry", `[SHADOW] Would open ${decision.proposal.totalSol} SOL (${decision.proposal.legs.map(leg => `${leg.strategy} ${leg.amountSol}`).join(" + ")}) on ${signal.mint.slice(0, 8)}; nothing submitted`);
-  void notify(`🕯️ Shadow proposal: ${decision.proposal.totalSol} SOL split ${decision.proposal.legs.map(leg => `${leg.amountSol} ${leg.strategy}`).join(" + ")} on ${signal.mint.slice(0, 8)}. Not submitted.`);
+  void notify(withFabriqContext(store, signal.mint, `🕯️ Shadow proposal: ${decision.proposal.totalSol} SOL split ${decision.proposal.legs.map(leg => `${leg.amountSol} ${leg.strategy}`).join(" + ")} on ${signal.mint.slice(0, 8)}. Not submitted.`));
   return null;
 }
 
@@ -177,11 +279,11 @@ async function attemptLegacyEntry(signal) {
   const attempt = store.data.attempts[mint];
   // One attempt chain per mint; bounded retries only for temporary failures.
   if (attempt && ["entered", "proposed", "submitting"].includes(attempt.status)) {
-    finishSignal(store, signal, `mint already attempted (${attempt.status})`);
+    endSignal(signal, `mint already attempted (${attempt.status})`);
     return null;
   }
   if (attempt?.status === "failed" && (attempt.failures ?? 0) >= 2) {
-    finishSignal(store, signal, "deploy failed repeatedly");
+    endSignal(signal, "deploy failed repeatedly");
     return null;
   }
 
@@ -189,7 +291,7 @@ async function attemptLegacyEntry(signal) {
   const positions = await getMyPositions({ force: true }).catch(() => null);
   if (!positions || positions.error || !Array.isArray(positions.positions)) return "position read unavailable";
   if (positions.positions.length >= config.risk.maxPositions) {
-    finishSignal(store, signal, "portfolio full");
+    endSignal(signal, "portfolio full");
     return null;
   }
 
@@ -202,7 +304,7 @@ async function attemptLegacyEntry(signal) {
   }
   if (!screened.pass) {
     if (screened.terminal) {
-      finishSignal(store, signal, `blocked: ${screened.reason}`);
+      endSignal(signal, `blocked: ${screened.reason}`);
       return null;
     }
     return screened.reason;
@@ -215,7 +317,7 @@ async function attemptLegacyEntry(signal) {
   if (balances.error || !Number.isFinite(balances.sol)) return "balance read unavailable";
   const amountY = computeDeployAmount(balances.sol);
   if (balances.sol < config.management.minSolToOpen + config.management.gasReserve) {
-    finishSignal(store, signal, "insufficient spendable SOL");
+    endSignal(signal, "insufficient spendable SOL");
     return null;
   }
 
@@ -256,10 +358,10 @@ async function attemptLegacyEntry(signal) {
     record.txs = result.txs ?? [];
     record.amountSol = amountY;
     store.save();
-    finishSignal(store, signal, record.status === "proposed" ? "shadow proposal recorded" : "entered");
+    endSignal(signal, record.status === "proposed" ? "shadow proposal recorded" : "entered");
     const label = result.dry_run ? "[SHADOW] Would deploy" : "Deployed";
     log("entry", `${label} ${amountY} SOL → pool ${pool.pool_address.slice(0, 8)} mint ${mint.slice(0, 8)} (${binsBelow} bins below, ${signal.events.length}-wallet convergence)`);
-    void notify(`${result.dry_run ? "🕯️ Shadow proposal" : "✅ Entry"}: ${amountY} SOL → ${pool.pool_address.slice(0, 8)} (mint ${mint.slice(0, 8)}, ${signal.events.length} wallets)`);
+    void notify(withFabriqContext(store, mint, `${result.dry_run ? "🕯️ Shadow proposal" : "✅ Entry"}: ${amountY} SOL → ${pool.pool_address.slice(0, 8)} (mint ${mint.slice(0, 8)}, ${signal.events.length} wallets)`));
     return null;
   }
 
@@ -386,13 +488,29 @@ function startHeartbeat() {
   timers.heartbeat = setInterval(() => {
     const stats = monitor?.stats ?? {};
     const active = Object.values(store.data.signals).filter(s => !s.done).length;
+    const activePursuits = signalInflight.size;
     const pending = Object.keys(store.data.pending).length;
     const lag = stats.lastLagMs != null ? `${(stats.lastLagMs / 1000).toFixed(1)}s` : "n/a";
     const mode = transactionsAreDryRun() ? (config.standalone.shadow ? "shadow" : "dry-run") : "live";
-    log("heartbeat", `mode=${mode} | monitor tx=${stats.transactions ?? 0} entries=${stats.entries ?? 0} lag=${lag} pending=${pending} errors=${stats.errors ?? 0} | signals active=${active} queued=${signalQueue.length}`);
+    log("heartbeat", `mode=${mode} | monitor tx=${stats.transactions ?? 0} entries=${stats.entries ?? 0} lag=${lag} pending=${pending} errors=${stats.errors ?? 0} | signals active=${active} pursuing=${activePursuits} queued=${signalQueue.length}`);
     store.prune();
     store.save();
   }, 60_000);
+}
+
+function startFabriqWatch() {
+  const fabriq = config.externalSignals?.fabriq;
+  if (!fabriq?.enabled) return () => {};
+  const poller = createFabriqPoller({
+    url: fabriq.url,
+    pollSec: fabriq.pollSec,
+    userAgent: fabriq.userAgent,
+    log: message => log("fabriq", message),
+    onAlerts: alerts => { ingestFabriqAlerts(alerts); },
+  });
+  void poller.start();
+  log("fabriq", `Watching ${fabriq.url} every ${fabriq.pollSec}s (context only, not a trigger)`);
+  return () => poller.stop();
 }
 
 function acquireLock() {
@@ -413,6 +531,7 @@ async function shutdown(signalName) {
   shuttingDown = true;
   log("runtime", `${signalName} received — shutting down`);
   for (const timer of Object.values(timers)) clearInterval(timer);
+  try { stopFabriq(); } catch { /* best-effort */ }
   try { stopAdmin?.(); } catch { /* best-effort */ }
   try { await monitor?.stop(); } catch { /* best-effort */ }
   // Best-effort stop notice; never let a slow Telegram call hold shutdown.
@@ -426,6 +545,8 @@ export async function startStandalone() {
   acquireLock();
 
   store = new MonitorStore();
+  const dropped = dropUnfinishedSignals(store);
+  if (dropped) log("runtime", `Dropped ${dropped} unfinished signal(s) from the previous process so they can re-trigger`);
   for (const [mint, attempt] of Object.entries(store.data.attempts)) {
     if (attempt.status === "submitting") {
       log("runtime_warn", `Mint ${mint.slice(0, 8)} was mid-submit at shutdown (position ${attempt.position ?? "unknown"}, txs ${attempt.txs?.length ?? 0}) — reconcile on-chain before re-enabling entries`);
@@ -433,10 +554,12 @@ export async function startStandalone() {
   }
 
   monitor = new WalletMonitor(store, config.standalone, { onSignal, wallets: watchedWallets });
+  stopFabriq = startFabriqWatch();
   const modeLabel = transactionsAreDryRun()
     ? (config.standalone.shadow ? "SHADOW MODE (proposals recorded, nothing submitted)" : "DRY RUN (shadow is off, but DRY_RUN=true still blocks submits)")
     : "LIVE MODE";
-  log("runtime", `Standalone starting — ${modeLabel} | threshold=${config.standalone.walletThreshold} wallets / ${config.standalone.windowSec}s window | screening deadline=${config.standalone.screeningDeadlineSec}s`);
+  const deadlineLabel = config.standalone.screeningDeadlineSec == null ? "none" : `${config.standalone.screeningDeadlineSec}s`;
+  log("runtime", `Standalone starting — ${modeLabel} | threshold=${config.standalone.walletThreshold} wallets / ${config.standalone.windowSec}s window | screening deadline=${deadlineLabel} | active signals=${config.standalone.maxActiveSignals}`);
 
   await monitor.start();
   if (!monitor.healthy()) {

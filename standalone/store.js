@@ -14,13 +14,60 @@ export class MonitorStore {
     fs.renameSync(`${this.file}.tmp`, this.file);
   }
   prune(now = Date.now()) {
-    this.data.events = this.data.events.filter(e => now - e.at < 10 * 60_000);
-    for (const [key, at] of Object.entries(this.data.seen)) if (now - at > 24 * 3600_000) delete this.data.seen[key];
-    for (const [mint, s] of Object.entries(this.data.signals)) if (s.done && now - s.createdAt > 24 * 3600_000) delete this.data.signals[mint];
-    // Attempt records double as mint-level duplicate protection; a day matches
-    // the pool-memory cooldown horizon. Never prune mid-submit checkpoints.
-    for (const [mint, a] of Object.entries(this.data.attempts)) if (a.status !== "submitting" && now - a.at > 24 * 3600_000) delete this.data.attempts[mint];
+    const day = 24 * 3600_000;
+    this.data.events = (this.data.events || []).filter(e => now - e.at < 10 * 60_000);
+    for (const [key, at] of Object.entries(this.data.seen || {})) if (now - at > day) delete this.data.seen[key];
+    for (const [key, pending] of Object.entries(this.data.pending || {})) {
+      if (now - (pending.queuedAt || 0) > day) delete this.data.pending[key];
+    }
+    for (const [mint, signal] of Object.entries(this.data.signals || {})) {
+      const closedAt = signal.closedAt || signal.createdAt || 0;
+      const staleDone = signal.done && now - closedAt > day;
+      const staleExpired = !signal.done && signal.deadline != null && now > signal.deadline + day;
+      if (staleDone || staleExpired) delete this.data.signals[mint];
+    }
+    // Attempt records double as mint-level duplicate protection. Never prune mid-submit checkpoints.
+    for (const [mint, attempt] of Object.entries(this.data.attempts || {})) {
+      if (attempt.status !== "submitting" && now - attempt.at > day) delete this.data.attempts[mint];
+    }
+    if (Array.isArray(this.data.shadowBook)) {
+      this.data.shadowBook = this.data.shadowBook.filter(position => position.status === "proposed" || now - (position.closedAt || position.openedAt || 0) < day);
+    }
+    pruneFabriqAlerts(this, now);
   }
+}
+
+const FABRIQ_RETENTION_MS = 24 * 3600_000;
+
+function pruneFabriqAlerts(store, now) {
+  for (const [mint, list] of Object.entries(store.data.fabriqAlerts || {})) {
+    const kept = (list || []).filter(alert => alert?.at != null && now - alert.at < FABRIQ_RETENTION_MS && alert.at <= now + 60_000);
+    if (kept.length) store.data.fabriqAlerts[mint] = kept;
+    else delete store.data.fabriqAlerts[mint];
+  }
+  for (const [id, at] of Object.entries(store.data.fabriqSeen || {})) {
+    if (now - at > FABRIQ_RETENTION_MS) delete store.data.fabriqSeen[id];
+  }
+}
+
+// Context only. These alerts are not convergence events and cannot open a signal.
+export function recordFabriqAlerts(store, alerts, now = Date.now()) {
+  if (!store.data.fabriqAlerts) store.data.fabriqAlerts = {};
+  if (!store.data.fabriqSeen) store.data.fabriqSeen = {};
+  const added = [];
+  for (const alert of alerts || []) {
+    if (!alert?.id || !alert.mint) continue;
+    if (store.data.fabriqSeen[alert.id]) continue;
+    store.data.fabriqSeen[alert.id] = now;
+    if (alert.at == null || now - alert.at >= FABRIQ_RETENTION_MS) continue;
+    const list = store.data.fabriqAlerts[alert.mint] || [];
+    list.push(alert);
+    store.data.fabriqAlerts[alert.mint] = list;
+    added.push(alert);
+  }
+  pruneFabriqAlerts(store, now);
+  if (added.length) store.save();
+  return added;
 }
 export function qualifyingEvents(events, mint, options, now = Date.now()) {
   const latest = new Map();
@@ -43,7 +90,7 @@ export function acceptEvents(store, events, options, now = Date.now()) {
     // A completed signal cannot be reused after its cooldown.
     const fresh = recent.filter(e => !existing || e.at > existing.closedAt);
     if (fresh.length < options.walletThreshold) continue;
-    const signal = { mint, createdAt: now, deadline: now + options.screeningDeadlineSec * 1000, nextCheck: now, events: fresh, done: false };
+    const signal = { mint, createdAt: now, deadline: signalDeadline(now, options), nextCheck: now, events: fresh, done: false };
     store.data.signals[mint] = signal;
     triggered.push(signal);
   }
@@ -51,7 +98,28 @@ export function acceptEvents(store, events, options, now = Date.now()) {
   store.save();
   return triggered;
 }
-export function finishSignal(store, signal, reason, options, now = Date.now()) {
-  Object.assign(signal, { done: true, reason, closedAt: now, cooldownUntil: now + options.cooldownSec * 1000 });
+export function signalDeadline(now, options = {}) {
+  const sec = options?.screeningDeadlineSec;
+  if (sec == null || sec === 0) return null;
+  const n = Number(sec);
+  return Number.isFinite(n) && n > 0 ? now + n * 1000 : null;
+}
+
+export function dropUnfinishedSignals(store) {
+  let dropped = 0;
+  for (const [mint, signal] of Object.entries(store.data.signals || {})) {
+    if (!signal.done) {
+      delete store.data.signals[mint];
+      dropped++;
+    }
+  }
+  if (dropped) store.save();
+  return dropped;
+}
+
+export function finishSignal(store, signal, reason, options = {}, now = Date.now()) {
+  const cooldownSec = Number(options?.cooldownSec);
+  const cooldown = Number.isFinite(cooldownSec) && cooldownSec >= 0 ? cooldownSec : 0;
+  Object.assign(signal, { done: true, reason, closedAt: now, cooldownUntil: now + cooldown * 1000 });
   store.save();
 }
