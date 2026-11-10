@@ -99,7 +99,7 @@ export const OWNER_STRATEGY = {
   },
   poolDepth: {
     enabled: true,
-    maxVolToLiq5m: 10,
+    maxVolToLiq5m: 15,
   },
   birdeyeEnabled: false,
   birdeyeBaseUrl: "https://public-api.birdeye.so",

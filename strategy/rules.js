@@ -153,7 +153,7 @@ export function crashDrawdown(snapshot, rules = {}) {
 
 export function poolDepth(snapshot, rules = {}) {
   const guard = rules.poolDepth || {};
-  const maxVolToLiq5m = Number(guard.maxVolToLiq5m) > 0 ? Number(guard.maxVolToLiq5m) : 10;
+  const maxVolToLiq5m = Number(guard.maxVolToLiq5m) > 0 ? Number(guard.maxVolToLiq5m) : 15;
   const enabled = guard.enabled !== false;
   const volume = presentNumber(snapshot?.poolVolume5mUsd);
   const liquidity = presentNumber(snapshot?.poolLiquidityUsd ?? snapshot?.liquidityUsd);

@@ -52,7 +52,7 @@ test("a PMURT-like dump and thin pool fail both guards, and a healthy book passe
   const depth = poolDepth(rug, rules);
   assert.equal(depth.ok, false);
   assert.equal(depth.volToLiq, 35.43);
-  assert.match(depth.reason, /35\.43 exceeds 10/);
+  assert.match(depth.reason, /35\.43 exceeds 15/);
 
   const decision = evaluateEntry(rug, rules);
   assert.equal(decision.pass, false);
