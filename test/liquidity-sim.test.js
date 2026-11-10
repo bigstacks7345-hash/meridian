@@ -73,6 +73,44 @@ test("reshape follows a bin move, flips near the edge, and waits for the interva
   assert.ok(summary.estimatedCostSol > 0);
 });
 
+test("a dump reshapes only the token side and a pump reshapes only the SOL side", () => {
+  const seeded = simulateLiquidity(position(), observe(120, 0), rules, 0);
+  const before = seeded.position.liquidity.bins.map(row => ({ ...row }));
+  const dumped = simulateLiquidity(seeded.position, observe(110, 61_000), rules, 61_000);
+  const dump = dumped.events[0];
+  assert.equal(dump.direction, "down");
+  assert.equal(dump.reshapedSide, "token");
+  assert.equal(dump.keptSide, "sol");
+  assert.equal(dump.mode, "one_side");
+  assert.equal(dump.shapeAfter, "spot_bidask_5050");
+  for (const row of dumped.position.liquidity.bins.filter(item => item.bin < 110)) {
+    assert.equal(row.share, before.find(item => item.bin === row.bin).share);
+  }
+  const pumped = simulateLiquidity(seeded.position, observe(130, 61_000), rules, 61_000);
+  const pump = pumped.events[0];
+  assert.equal(pump.direction, "up");
+  assert.equal(pump.reshapedSide, "sol");
+  assert.equal(pump.keptSide, "token");
+  for (const row of pumped.position.liquidity.bins.filter(item => item.bin >= 130)) {
+    assert.equal(row.share, before.find(item => item.bin === row.bin).share);
+  }
+  const lowerEdge = simulateLiquidity(seeded.position, observe(101, 61_000), rules, 61_000);
+  assert.equal(lowerEdge.events[0].reason, "flip buffer");
+  assert.equal(lowerEdge.events[0].reshapedSide, "token");
+  assert.equal(lowerEdge.events[0].keptSide, "sol");
+  const upperEdge = simulateLiquidity(seeded.position, observe(139, 61_000), rules, 61_000);
+  assert.equal(upperEdge.events[0].reason, "flip buffer");
+  assert.equal(upperEdge.events[0].reshapedSide, "sol");
+  assert.equal(upperEdge.events[0].keptSide, "token");
+  const bothRules = { ...rules, reshapeLiquidity: { ...rules.reshapeLiquidity, mode: "both_sides" } };
+  const both = simulateLiquidity(seeded.position, observe(110, 61_000), bothRules, 61_000);
+  assert.equal(both.events[0].reshapedSide, "both");
+  assert.equal(both.events[0].keptSide, null);
+  assert.equal(both.events[0].shapeAfter, "curve");
+  assert.ok(dump.estimatedCostSol < both.events[0].estimatedCostSol);
+  assert.equal(both.events[0].executed, false);
+});
+
 test("the liquidity simulator has no transaction or submit path", () => {
   const source = fs.readFileSync(new URL("../strategy/liquidity-management.js", import.meta.url), "utf8");
   for (const token of ["executeTool", "sendTransaction", "sendRawTransaction", "VersionedTransaction", "signTransaction"]) {

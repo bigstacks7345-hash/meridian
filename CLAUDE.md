@@ -30,7 +30,7 @@ The app is the standalone wallet-triggered bot. There is no legacy mode or LLM d
 - Wallet entries require fresh convergence of the watched wallets. Do not reintroduce broad scans or expose a bypass through the CLI.
 - A Fabriq HOT alert opens its own signal with no screening deadline. It still has to pass every entry filter. Wallet pursuits take priority when `maxActiveSignals` is full. A Fabriq pursuit ends when no newer alert arrives within `staleAfterSec` (default 1800). The first poll after startup is separate: it ignores posts older than `pollSec * 3` (60 seconds at the default), not `staleAfterSec`.
 - `crashGuard` rejects a quote price more than 60% below the highest 1m high of the last 30 minutes. `poolDepth` rejects when that pool's own 5m volume divided by its liquidity is above 15, and it fails closed when the pool volume is missing. Both apply to wallet and Fabriq entries.
-- `autoCompound` and `reshapeLiquidity` only simulate on open shadow positions. `execute` stays false and neither path builds or submits a transaction.
+- `autoCompound` and `reshapeLiquidity` only simulate on open shadow positions. `execute` stays false and neither path builds or submits a transaction. The default reshape moves one side: token bins on a dump, SOL bins on a pump.
 - This build forces shadow mode and `DRY_RUN=true`. `transactionsAreDryRun()` stays true. Do not load `walletKey` into `WALLET_PRIVATE_KEY`.
 - Missing data must not be interpreted as empty positions or spendable funds.
 - Keep entry screening independent of exit polling. Serialize wallet mutations through the existing queue.
