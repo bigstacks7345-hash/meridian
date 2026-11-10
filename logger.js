@@ -50,7 +50,7 @@ function actionHint(action) {
     case "get_my_positions":  return ` ${r.total_positions ?? ""} positions`;
     case "get_wallet_balance":return ` ${r.sol ?? ""} SOL`;
     case "get_top_candidates":return ` ${r?.candidates?.length ?? ""} pools`;
-    case "swap_token":        return ` ${a.amount} ${a.input_mint?.slice(0,6)}→SOL`;
+    case "swap_token":        return ` ${a.amount} ${(a.input_mint || "").slice(0, 6)}→${(a.output_mint || "").slice(0, 6)}`;
     case "update_config":     return ` ${Object.keys(r.applied || {}).join(", ")}`;
     case "add_lesson":        return ` saved`;
     case "clear_lessons":     return ` cleared ${r.cleared ?? ""}`;

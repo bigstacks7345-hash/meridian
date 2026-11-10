@@ -219,7 +219,7 @@ console.log("\n[6] rejectToken / rejectPool — missing data never passes");
   const base = {
     id: MINT, updatedAt: new Date(now - 10_000).toISOString(),
     audit: { mintAuthorityDisabled: true, freezeAuthorityDisabled: true, topHoldersPercentage: 30, botHoldersPercentage: 10 },
-    fees: 50, launchpad: null, holderCount: 800, mcap: 400_000, organicScore: 75,
+    fees: 50, launchpad: null, holderCount: 2_000, mcap: 400_000, organicScore: 75,
     createdAt: new Date(now - 3 * 3600_000).toISOString(),
   };
   check("healthy token passes", rejectToken(base, MINT, config.screening, now) === null);

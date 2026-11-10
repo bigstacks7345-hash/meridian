@@ -29,7 +29,7 @@ export function rejectToken(token, mint, s, now = Date.now()) {
   if (s.allowedLaunchpads.length && !s.allowedLaunchpads.includes(token.launchpad)) return 'Launchpad is not allowed';
   if (s.blockedLaunchpads.includes(token.launchpad)) return 'Launchpad is blocked';
   if (number(token.holderCount) == null || token.holderCount < s.minHolders) return 'Insufficient holders';
-  if (number(token.mcap) == null || token.mcap < s.minMcap || token.mcap > s.maxMcap) return 'Market cap outside limits';
+  if (number(token.mcap) == null || token.mcap < s.minMcap || (s.maxMcap != null && token.mcap > s.maxMcap)) return 'Market cap outside limits';
   if (number(token.organicScore) == null || token.organicScore < s.minOrganic) return 'Organic activity below threshold';
   const age = (now - Date.parse(token.createdAt)) / 3600_000;
   if ((s.minTokenAgeHours != null || s.maxTokenAgeHours != null) && (!Number.isFinite(age) || age < 0)) return 'Token age unknown';

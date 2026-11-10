@@ -2,7 +2,7 @@ import { deployPosition, getMyPositions, claimFees, closePosition } from "./dlmm
 import { getWalletBalances, swapToken } from "./wallet.js";
 import { withWalletLock } from "../standalone/transactions.js";
 import { invalidateBalances } from "../standalone/balances.js";
-import { config, MIN_SAFE_BINS_BELOW } from "../config.js";
+import { config, MIN_SAFE_BINS_BELOW, transactionsAreDryRun } from "../config.js";
 import { addPoolNote } from "../pool-memory.js";
 import { log, logAction } from "../logger.js";
 import { notifyDeploy, notifyClose, notifySwap } from "../telegram.js";
@@ -249,12 +249,14 @@ async function executeToolUnlocked(name, args) {
     });
 
     if (success) {
-      if (name === "swap_token" && result.tx) {
+      if (!result?.dry_run && name === "swap_token" && result.tx) {
         notifySwap({ inputSymbol: args.input_mint?.slice(0, 8), outputSymbol: args.output_mint === "So11111111111111111111111111111111111111112" || args.output_mint === "SOL" ? "SOL" : args.output_mint?.slice(0, 8), amountIn: result.amount_in, amountOut: result.amount_out, tx: result.tx }).catch(() => {});
-      } else if (name === "deploy_position") {
+      } else if (!result?.dry_run && name === "deploy_position") {
         notifyDeploy({ pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8), amountSol: args.amount_y ?? args.amount_sol ?? 0, position: result.position, tx: result.txs?.[0] ?? result.tx, priceRange: result.price_range, rangeCoverage: result.range_coverage, binStep: result.bin_step, baseFee: result.base_fee }).catch(() => {});
-      } else if (name === "close_position") {
+      } else if (!result?.dry_run && name === "close_position") {
         notifyClose({ pair: result.pool_name || args.position_address?.slice(0, 8), pnlUsd: result.pnl_usd ?? 0, pnlPct: result.pnl_pct ?? 0 }).catch(() => {});
+      }
+      if (name === "close_position" && !result?.dry_run) {
         // Note low-yield closes in pool memory so screener avoids redeploying
         if (args.reason && args.reason.toLowerCase().includes("yield")) {
           const poolAddr = result.pool || args.pool_address;
@@ -270,7 +272,7 @@ async function executeToolUnlocked(name, args) {
             if (swapResult?.amount_out) result.sol_received = swapResult.amount_out;
           }
         }
-      } else if (name === "claim_fees" && config.management.autoSwapAfterClaim && result.base_mint) {
+      } else if (!result?.dry_run && name === "claim_fees" && config.management.autoSwapAfterClaim && result.base_mint) {
         await swapBaseToSolWithRetry(result.base_mint, "after claim");
       }
     }
@@ -433,7 +435,7 @@ async function runSafetyChecks(name, args) {
       }
 
       // Check SOL balance
-      if (process.env.DRY_RUN !== "true") {
+      if (!transactionsAreDryRun()) {
         const balance = await getWalletBalances({ force: true, nativeOnly: true });
         if (balance.error || !Number.isFinite(balance.sol)) return { pass: false, reason: "Balance read unavailable" };
         const gasReserve = config.management.gasReserve;

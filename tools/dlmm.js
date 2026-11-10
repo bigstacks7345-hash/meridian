@@ -6,7 +6,7 @@ import {
 } from "@solana/web3.js";
 import BN from "bn.js";
 import bs58 from "bs58";
-import { config, computeDeployAmount, MIN_SAFE_BINS_BELOW } from "../config.js";
+import { config, computeDeployAmount, MIN_SAFE_BINS_BELOW, transactionsAreDryRun } from "../config.js";
 import { log } from "../logger.js";
 import {
   trackPosition,
@@ -347,7 +347,7 @@ export async function deployPosition({
     );
   }
 
-  if (process.env.DRY_RUN === "true") {
+  if (transactionsAreDryRun()) {
     return {
       dry_run: true,
       would_deploy: {
@@ -837,6 +837,12 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
                   : parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenX?.usd || 0) + parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenY?.usd || 0)
               ) * 10000) / 10000
             : null,
+          unclaimed_fee_token_usd: binData
+            ? Math.round(parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenX?.usd || 0) * 10000) / 10000
+            : null,
+          unclaimed_fee_sol_usd: binData
+            ? Math.round(parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenY?.usd || 0) * 10000) / 10000
+            : null,
           total_value_usd:    binData
             ? Math.round((
                 config.management.solMode
@@ -910,7 +916,7 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
 // ─── Claim Fees ────────────────────────────────────────────────
 export async function claimFees({ position_address }) {
   position_address = normalizeMint(position_address);
-  if (process.env.DRY_RUN === "true") {
+  if (transactionsAreDryRun()) {
     return { dry_run: true, would_claim: position_address, message: "DRY RUN — no transaction sent" };
   }
 
@@ -956,7 +962,7 @@ export async function claimFees({ position_address }) {
 // ─── Close Position ────────────────────────────────────────────
 export async function closePosition({ position_address, reason }) {
   position_address = normalizeMint(position_address);
-  if (process.env.DRY_RUN === "true") {
+  if (transactionsAreDryRun()) {
     return { dry_run: true, would_close: position_address, message: "DRY RUN — no transaction sent" };
   }
 

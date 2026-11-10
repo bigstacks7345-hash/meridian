@@ -10,7 +10,7 @@ Standalone wallet-triggered Meteora DLMM bot for Solana. It waits for fresh LP e
 4. Recheck exposure, price movement, balances, and transaction safety before entry. Failed screening waits within a bounded deadline.
 5. Monitor positions independently and execute rule-based closes and fee claims.
 
-Shadow mode is the default and forces `DRY_RUN=true` for all transaction paths. It records proposals without submitting them. Read [user-config.example.json](user-config.example.json) for supported settings. Monitoring and screening implementation details are in [standalone/](standalone/).
+This build stays in shadow mode and forces `DRY_RUN=true` even if a config file says otherwise. Close, claim, and swap return before any signature or broadcast. Owner entries are recorded as shadow proposals. Read [user-config.example.json](user-config.example.json) for the strategy parameters.
 
 ## Setup
 
@@ -24,7 +24,7 @@ node cli.js wallets add --wallet OTHER_ADDRESS --name OTHER_NAME
 npm start
 ```
 
-Setup writes `user-config.json` and starts with shadow mode enabled. It preserves existing settings when prompts are left blank. Set credentials in your environment or local `.env`; see [.env.example](.env.example). For read-only operation, `WALLET_ADDRESS` / `walletAddress` can identify the portfolio without a private key. Live signing requires `WALLET_PRIVATE_KEY`.
+Setup writes `user-config.json` and sets `shadowMode` to `true`. It preserves existing settings when prompts are left blank, including the example `rpcUrl` when you do not type one. That example host is a public mainnet RPC. Starting the daemon uses it for wallet subscriptions and reads even while submits are blocked. Set credentials in your environment or local `.env`; see [.env.example](.env.example). For read-only operation, `WALLET_ADDRESS` / `walletAddress` can identify the portfolio without a private key. Live signing requires `WALLET_PRIVATE_KEY`. A `walletKey` field inside `user-config.json` is also loaded as that private key; keep the key in `.env` instead.
 
 Supported infrastructure overrides:
 
@@ -36,12 +36,18 @@ Supported infrastructure overrides:
 | `FALLBACK_RPC_URL` | Fallback for monitor/balance reads |
 | `PNL_SOURCE` | `meteora` (default) or `rpc` |
 | `PNL_RPC_URL` | Optional on-chain PnL engine endpoint |
-| `JUPITER_API_KEY` | Jupiter price and swap access |
+| `JUPITER_API_KEY` | Jupiter price and swap access. Required for authenticated calls; the process has no built-in key |
+| `JUPITER_REFERRAL_ACCOUNT`, `JUPITER_REFERRAL_FEE_BPS` | Optional override for the live-swap referral |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | Optional outbound notifications |
+| `TELEGRAM_ALLOWED_USER_IDS` | Enables the in-chat admin console. Leave unset to keep it off |
 
-Balances use standard RPC, including SPL Token and Token-2022. PnL defaults to Meteora portfolio and position APIs, with an on-chain fallback. Jupiter supplies prices, token data, and swaps. Telegram is notification-only; the previous agent chat and command menus are archived.
+Balances use standard RPC, including SPL Token and Token-2022. PnL defaults to Meteora portfolio and position APIs, with an on-chain fallback. Jupiter supplies prices, token data, and swaps. Live swaps attach the built-in referral unless those referral variables override it.
 
-To enable live trading, review your thresholds, wallet list, and shadow results, set `shadowMode` to `false`, remove any `DRY_RUN=true` override, and restart. Configuration edits take effect after restart.
+This build forces shadow mode and `DRY_RUN=true`. `npm run safety` stays at `"willSubmit": false`. Telegram notifications can still be sent. The admin console does not start, so it cannot arm trading, import a key, or display a key.
+
+The owner parameters live in `ownerStrategy` inside [user-config.example.json](user-config.example.json). The volume profile is a TradingView visible-range VPVR equivalent: 24 rows over the high/low of the shorter of the prior 24 hours and the token's whole life. A token younger than 24 hours must include its launch minute or the entry is skipped. Volume is split across each 1-minute bar's range, and TradingView's one-row value-area rule is used. It is computed once at a shadow entry and locked. `candleProvider` defaults to `none` and fails closed. `gmgn` paginates `/v1/market/token_kline`. Its `volume` field is USD notional and `amount` is token units. OHLC from that route is in USD, so quote prices divide each token candle by the wrapped-SOL candle at the same timestamp. The profile, indicators, range, and exits use that quote price. Dollar checks keep the USD volume. `birdeye` is a stub for `/defi/v3/ohlcv`.
+
+`npm run shadow-replay` runs one offline scenario and does not sign or broadcast.
 
 ## Commands
 
@@ -57,7 +63,7 @@ node cli.js close --position ADDRESS --dry-run
 node cli.js performance
 ```
 
-`screen --mint` is read-only and never deploys. New entries are available only through wallet convergence. Manual close, claim, and swap operations remain available; run `help` for arguments. The CLI no longer writes skills into your home directory.
+`screen --mint` is read-only and never deploys. New entries are available only through wallet convergence. Manual close, claim, and swap operations remain available; pass `--dry-run` to force the non-broadcast return. A live close swaps the base token back to SOL unless `--skip-swap` is set. Run `help` for arguments. The CLI no longer writes skills into your home directory.
 
 For a managed daemon:
 
@@ -76,9 +82,10 @@ A `submitting` attempt left by a restart needs on-chain reconciliation before th
 
 ```sh
 npm test
+npm run safety
 ```
 
-This checks JavaScript syntax, the standalone signal/rule tests, module imports, CLI behavior, and the Meteora PnL path with mocked data. Tests do not submit transactions.
+`npm test` checks JavaScript syntax, the standalone signal/rule tests, module imports, CLI behavior, the Meteora PnL path with mocked data, and the non-broadcast dry-run gate. Tests do not submit transactions. `npm run safety` prints shadow mode, whether submits are blocked, and whether a key or Telegram admin allowlist is set. It prints an RPC host, never a URL or secret.
 
 ## Legacy archive
 
