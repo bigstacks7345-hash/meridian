@@ -26,12 +26,16 @@ function screeningDeadlineSec(value) {
 function fabriqConfig(raw = {}) {
   const channel = nonEmptyString(raw.channel) || "fabriqalert";
   const pollSec = Number(raw.pollSec);
+  const staleAfterSec = Number(raw.staleAfterSec);
+  const maxActive = Number(raw.maxActive);
   return {
     enabled: raw.enabled === undefined ? true : Boolean(raw.enabled),
     pollSec: Number.isFinite(pollSec) && pollSec > 0 ? pollSec : 20,
+    staleAfterSec: Number.isFinite(staleAfterSec) && staleAfterSec > 0 ? staleAfterSec : 1800,
+    maxActive: Number.isFinite(maxActive) && maxActive > 0 ? Math.round(maxActive) : 3,
     channel,
     url: nonEmptyString(raw.url) || `https://t.me/s/${channel}`,
-    userAgent: "MeridianShadow/1.0 (watch-only; public Telegram preview)",
+    userAgent: "MeridianShadow/1.0 (public Telegram preview)",
   };
 }
 

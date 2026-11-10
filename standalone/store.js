@@ -50,7 +50,7 @@ function pruneFabriqAlerts(store, now) {
   }
 }
 
-// Context only. These alerts are not convergence events and cannot open a signal.
+// Recent HOT posts. Opening a signal is a separate decision from storing one.
 export function recordFabriqAlerts(store, alerts, now = Date.now()) {
   if (!store.data.fabriqAlerts) store.data.fabriqAlerts = {};
   if (!store.data.fabriqSeen) store.data.fabriqSeen = {};
@@ -68,6 +68,37 @@ export function recordFabriqAlerts(store, alerts, now = Date.now()) {
   pruneFabriqAlerts(store, now);
   if (added.length) store.save();
   return added;
+}
+
+// A Fabriq alert is its own signal. An active pursuit is refreshed in place.
+// A finished signal stays finished until its cooldown ends.
+export function acceptFabriqAlert(store, alert, now = Date.now()) {
+  if (!alert?.mint) return { action: "ignore", signal: null };
+  if (!store.data.signals) store.data.signals = {};
+  const existing = store.data.signals[alert.mint];
+  if (existing && !existing.done) {
+    existing.lastAlertAt = now;
+    existing.fabriqAlert = alert;
+    if (alert.pool) existing.pool = alert.pool;
+    store.save();
+    return { action: "refresh", signal: existing };
+  }
+  if (existing?.done && now < (existing.cooldownUntil || 0)) return { action: "cooldown", signal: existing };
+  const signal = {
+    mint: alert.mint,
+    source: "fabriq",
+    pool: alert.pool || null,
+    createdAt: now,
+    deadline: null,
+    lastAlertAt: now,
+    nextCheck: now,
+    fabriqAlert: alert,
+    events: [],
+    done: false,
+  };
+  store.data.signals[alert.mint] = signal;
+  store.save();
+  return { action: "open", signal };
 }
 export function qualifyingEvents(events, mint, options, now = Date.now()) {
   const latest = new Map();

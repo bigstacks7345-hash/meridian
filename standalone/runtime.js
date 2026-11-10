@@ -10,7 +10,7 @@ import { config, computeDeployAmount, transactionsAreDryRun } from "../config.js
 import { log } from "../logger.js";
 import { repoPath } from "../repo-root.js";
 import { sendMessage as tgSend, isEnabled as tgEnabled } from "../telegram.js";
-import { MonitorStore, dropUnfinishedSignals, finishSignal, recordFabriqAlerts } from "./store.js";
+import { MonitorStore, acceptFabriqAlert, dropUnfinishedSignals, finishSignal, recordFabriqAlerts } from "./store.js";
 import { createFabriqPoller, withFabriqContext } from "./fabriq.js";
 import { WalletMonitor } from "./monitor.js";
 import { screenMint, poolDetail } from "./screening.js";
@@ -33,6 +33,7 @@ let lockPath = null;
 let stopAdmin = null;
 let stopFabriq = () => {};
 let notifySink = null;
+let fabriqStartupPending = true;
 let shuttingDown = false;
 let manageBusy = false;
 let pollBusy = false;
@@ -49,6 +50,10 @@ const pursuitDeps = { ...defaultPursuitDeps };
 
 export function resetPursuitDeps() {
   Object.assign(pursuitDeps, defaultPursuitDeps);
+}
+
+export function resetFabriqStartup() {
+  fabriqStartupPending = true;
 }
 
 function signalOptions() {
@@ -109,33 +114,121 @@ async function notify(text) {
   try { if (tgEnabled()) await tgSend(text); } catch { /* notifications are best-effort */ }
 }
 
-// Logs and stores Fabriq alerts. Does not enqueue a signal or read the market.
-export function ingestFabriqAlerts(alerts, now = Date.now()) {
+function logFabriq(alert) {
+  log("fabriq", `HOT ${alert.symbol ?? "?"} ${alert.mint.slice(0, 8)} score=${alert.score ?? "?"} 5m=${alert.volume5mLabel ?? "?"} pool=${alert.pool ? alert.pool.slice(0, 8) : "n/a"} id=${alert.id}`);
+}
+
+// Store every new post. The first poll after startup does not turn posts older
+// than three poll intervals into signals. A newer post for an active mint only
+// refreshes that pursuit.
+export function ingestFabriqAlerts(alerts, now = Date.now(), options = {}) {
   if (!store) return [];
-  const added = recordFabriqAlerts(store, alerts, now);
+  const startup = options.startup !== undefined ? options.startup : fabriqStartupPending;
+  if (options.startup === undefined) fabriqStartupPending = false;
+  const maxAge = Math.max(1, Number(config.externalSignals?.fabriq?.pollSec ?? 20)) * 3 * 1000;
+  const ignored = [];
+  const actionable = [];
+  for (const alert of alerts || []) {
+    if (!alert?.id || !alert.mint) continue;
+    if (startup && Number.isFinite(alert.at) && now - alert.at > maxAge) ignored.push(alert);
+    else actionable.push(alert);
+  }
+  recordFabriqAlerts(store, ignored, now);
+  for (const alert of ignored) log("fabriq", `startup skip ${alert.id} ${alert.mint.slice(0, 8)} (${Math.round((now - alert.at) / 1000)}s old)`);
+  const added = recordFabriqAlerts(store, actionable, now);
   for (const alert of added) {
-    log("fabriq", `HOT ${alert.symbol ?? "?"} ${alert.mint.slice(0, 8)} score=${alert.score ?? "?"} 5m=${alert.volume5mLabel ?? "?"} pool=${alert.pool ? alert.pool.slice(0, 8) : "n/a"} id=${alert.id}`);
+    logFabriq(alert);
+    const result = acceptFabriqAlert(store, alert, now);
+    if (result.action === "open") enqueueSignal(result.signal);
+    else if (result.action === "refresh") log("fabriq", `Refreshed ${alert.mint.slice(0, 8)} (${alert.id})`);
+    else if (result.action === "cooldown") log("fabriq", `Cooldown holds ${alert.mint.slice(0, 8)}; ${alert.id} did not open a signal`);
   }
   return added;
 }
 
 // ─── Signal pursuit ──────────────────────────────────────────────────────────
 
+function globalPursuitLimit() {
+  return Math.max(1, Number(config.standalone.maxActiveSignals ?? 5));
+}
+
+function fabriqPursuitLimit() {
+  return Math.max(1, Number(config.externalSignals?.fabriq?.maxActive ?? 3));
+}
+
+function isFabriq(signal) {
+  return signal?.source === "fabriq";
+}
+
+function fabriqInflightCount() {
+  let count = 0;
+  for (const mint of signalInflight) if (isFabriq(store?.data?.signals?.[mint])) count++;
+  return count;
+}
+
+function fabriqPursuitCount() {
+  return fabriqInflightCount() + signalQueue.filter(isFabriq).length;
+}
+
+function sourceLabel(signal) {
+  if (isFabriq(signal)) return "Fabriq HOT";
+  const names = (signal?.events || []).map(event => String(event.wallet || "").slice(0, 6)).filter(Boolean);
+  return `2 wallets: ${names.join(", ")}`;
+}
+
+function notifyAbout(signal, text) {
+  const body = isFabriq(signal) ? text : withFabriqContext(store, signal.mint, text);
+  void notify(body);
+}
+
+function evictOldestFabriq() {
+  let oldest = null;
+  for (const mint of signalInflight) {
+    const signal = store?.data?.signals?.[mint];
+    if (!isFabriq(signal) || signal.done) continue;
+    const started = signal.startedAt || signal.createdAt || 0;
+    if (!oldest || started < (oldest.startedAt || oldest.createdAt || 0)) oldest = signal;
+  }
+  if (!oldest) return false;
+  endSignal(oldest, "evicted for a wallet signal");
+  signalInflight.delete(oldest.mint);
+  log("signal", `Evicted Fabriq pursuit ${oldest.mint.slice(0, 8)} for a wallet signal`);
+  return true;
+}
+
 function onSignal(signal) {
-  if (signal.done) return;
+  if (!signal || signal.done) return;
   if (signalInflight.has(signal.mint) || signalQueue.some(queued => queued.mint === signal.mint)) return;
-  signalQueue.push(signal);
+  if (isFabriq(signal) && fabriqPursuitCount() >= fabriqPursuitLimit()) {
+    endSignal(signal, "fabriq pursuit cap full");
+    log("fabriq", `Dropped ${signal.mint.slice(0, 8)}: fabriq cap ${fabriqPursuitLimit()} is full`);
+    noteIdle();
+    return;
+  }
+  if (isFabriq(signal)) signalQueue.push(signal);
+  else {
+    signalQueue.unshift(signal);
+    while (signalInflight.size >= globalPursuitLimit() && evictOldestFabriq()) { /* wallet signals take the slot */ }
+  }
   drainSignals();
 }
 
 export function drainSignals() {
-  const limit = Math.max(1, Number(config.standalone.maxActiveSignals ?? 5));
+  const limit = globalPursuitLimit();
   while (!shuttingDown && signalInflight.size < limit && signalQueue.length) {
-    const signal = signalQueue.shift();
+    const walletIndex = signalQueue.findIndex(signal => !isFabriq(signal) && !signal.done);
+    let index = walletIndex;
+    if (index < 0) {
+      if (fabriqInflightCount() >= fabriqPursuitLimit()) break;
+      index = signalQueue.findIndex(signal => !signal.done);
+    }
+    if (index < 0) break;
+    const signal = signalQueue.splice(index, 1)[0];
     if (!signal || signal.done || signalInflight.has(signal.mint)) continue;
+    signal.startedAt = signal.startedAt || Date.now();
     signalInflight.add(signal.mint);
     void pursueSignal(signal).catch(error => {
-      try { endSignal(signal, `error: ${error.message}`); }
+      try { if (!signal.done) endSignal(signal, `error: ${error.message}`); }
       catch (finishError) { log("signal_error", `Signal finish failed: ${finishError.message}`); }
       log("signal_error", `Signal ${signal.mint.slice(0, 8)} aborted: ${error.message}`);
     }).finally(() => {
@@ -148,7 +241,15 @@ export function drainSignals() {
   return signalPursuitSettled();
 }
 
+function fabriqWentStale(signal, now = Date.now()) {
+  if (!isFabriq(signal)) return false;
+  const staleSec = Number(config.externalSignals?.fabriq?.staleAfterSec ?? 1800);
+  const last = signal.lastAlertAt || signal.createdAt || now;
+  return now - last >= Math.max(1, staleSec) * 1000;
+}
+
 async function triggeringExposureGone(signal) {
+  if (isFabriq(signal)) return false;
   const events = signal.events || [];
   if (!events.length) return false;
   let present = 0;
@@ -164,19 +265,23 @@ async function triggeringExposureGone(signal) {
 // Screen and enter until the deadline, or indefinitely when deadline is null.
 // Temporary failures back off. A terminal result or departed wallets ends it.
 export async function pursueSignal(signal) {
-  const wallets = signal.events.map(e => `${e.wallet.slice(0, 6)}(◎${e.depositSol.toFixed(1)})`).join(", ");
   const deadlineLabel = signal.deadline == null ? "no deadline" : `${config.standalone.screeningDeadlineSec}s deadline`;
-  log("signal", `Convergence on ${signal.mint.slice(0, 8)}: ${signal.events.length} wallets [${wallets}] — screening with ${deadlineLabel}`);
-  void notify(withFabriqContext(store, signal.mint, `👀 Signal: ${signal.events.length} watched wallets on ${signal.mint.slice(0, 8)}`));
+  log("signal", `${sourceLabel(signal)} on ${signal.mint.slice(0, 8)} — screening with ${deadlineLabel}`);
+  notifyAbout(signal, `👀 Signal: ${sourceLabel(signal)} on ${signal.mint.slice(0, 8)}`);
   let lastReason = "no attempt";
   while (!shuttingDown && signalStillOpen(signal)) {
+    if (fabriqWentStale(signal)) {
+      endSignal(signal, "fabriq alert went stale");
+      log("signal", `Signal ${signal.mint.slice(0, 8)} ended: fabriq alert went stale`);
+      return;
+    }
     if (await triggeringExposureGone(signal)) {
       endSignal(signal, "triggering wallets left the token");
       log("signal", `Signal ${signal.mint.slice(0, 8)} ended: triggering wallets left the token`);
       return;
     }
     const reason = await attemptEntry(signal);
-    if (reason == null) return;
+    if (reason == null || signal.done) return;
     lastReason = reason;
     const wait = nextRetryMs(signal);
     if (wait > 0) await pursuitDeps.sleep(wait);
@@ -242,7 +347,10 @@ async function attemptOwnerEntry(signal) {
   } catch (error) {
     return `market data error: ${error.message}`;
   }
+  if (signal.done) return null;
+  if (signal.pool && snapshot?.ok) snapshot = { ...snapshot, poolAddress: signal.pool };
   const decision = planShadowEntry({ signal, snapshot, book, rules, now });
+  if (signal.done) return null;
   if (!decision.ok) {
     log("entry", `shadow skip ${signal.mint.slice(0, 8)}: ${decision.reason}`);
     if (decision.terminal) {
@@ -266,7 +374,7 @@ async function attemptOwnerEntry(signal) {
   store.save();
   endSignal(signal, "shadow proposal recorded");
   log("entry", `[SHADOW] Would open ${decision.proposal.totalSol} SOL (${decision.proposal.legs.map(leg => `${leg.strategy} ${leg.amountSol}`).join(" + ")}) on ${signal.mint.slice(0, 8)}; nothing submitted`);
-  void notify(withFabriqContext(store, signal.mint, `🕯️ Shadow proposal: ${decision.proposal.totalSol} SOL split ${decision.proposal.legs.map(leg => `${leg.amountSol} ${leg.strategy}`).join(" + ")} on ${signal.mint.slice(0, 8)}. Not submitted.`));
+  notifyAbout(signal, `🕯️ Shadow proposal (${sourceLabel(signal)}): ${decision.proposal.totalSol} SOL split ${decision.proposal.legs.map(leg => `${leg.amountSol} ${leg.strategy}`).join(" + ")} on ${signal.mint.slice(0, 8)}. Not submitted.`);
   return null;
 }
 
@@ -361,7 +469,7 @@ async function attemptLegacyEntry(signal) {
     endSignal(signal, record.status === "proposed" ? "shadow proposal recorded" : "entered");
     const label = result.dry_run ? "[SHADOW] Would deploy" : "Deployed";
     log("entry", `${label} ${amountY} SOL → pool ${pool.pool_address.slice(0, 8)} mint ${mint.slice(0, 8)} (${binsBelow} bins below, ${signal.events.length}-wallet convergence)`);
-    void notify(withFabriqContext(store, mint, `${result.dry_run ? "🕯️ Shadow proposal" : "✅ Entry"}: ${amountY} SOL → ${pool.pool_address.slice(0, 8)} (mint ${mint.slice(0, 8)}, ${signal.events.length} wallets)`));
+    notifyAbout(signal, `${result.dry_run ? "🕯️ Shadow proposal" : "✅ Entry"} (${sourceLabel(signal)}): ${amountY} SOL → ${pool.pool_address.slice(0, 8)} (mint ${mint.slice(0, 8)})`);
     return null;
   }
 

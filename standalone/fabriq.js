@@ -1,6 +1,6 @@
-// Watch-only reader for the public Fabriq HOT preview (https://t.me/s/fabriqalert).
-// Parsed alerts are context for wallet signals. They must not open a signal,
-// start screening, or call GMGN.
+// Public Fabriq HOT preview (https://t.me/s/fabriqalert).
+// A parsed alert can open its own signal. This module only fetches and parses.
+// It does not call GMGN.
 
 const POST_RE = /data-post="(fabriqalert\/\d+)"/g;
 const MINT_RE = /<code>([1-9A-HJ-NP-Za-km-z]{32,44})<\/code>/;
@@ -117,7 +117,7 @@ export function withFabriqContext(store, mint, text, now = Date.now()) {
 export function createFabriqPoller({
   url,
   pollSec = 20,
-  userAgent = "MeridianShadow/1.0 (watch-only; public Telegram preview)",
+  userAgent = "MeridianShadow/1.0 (public Telegram preview)",
   fetchImpl = globalThis.fetch,
   onAlerts = () => {},
   log = () => {},

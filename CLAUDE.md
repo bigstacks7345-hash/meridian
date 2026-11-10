@@ -8,6 +8,7 @@ The app is the standalone wallet-triggered bot. There is no legacy mode or LLM d
 - `cli.js`: explicit read commands and manual close/claim/swap; `start` launches the daemon. `screen --mint` is read-only.
 - `setup.js`: standalone configuration wizard; enables shadow mode.
 - `standalone/runtime.js`: signal pursuit, screening deadlines, entry execution, deterministic management, fast exit polling, heartbeat, process lock.
+- `standalone/fabriq.js`: public Fabriq HOT preview. A fresh alert is its own signal and uses the same entry filters. It is not a watched wallet.
 - `standalone/monitor.js`: subscriptions, transaction queue, baseline, signature backfill.
 - `standalone/events.js`: DLMM event-CPI decoding and position/exposure checks. SDK is loaded lazily.
 - `standalone/store.js`: persisted deduplication, convergence windows, cooldowns, and recovery attempts.
@@ -26,7 +27,8 @@ The app is the standalone wallet-triggered bot. There is no legacy mode or LLM d
 
 ## Invariants
 
-- Entries require fresh wallet convergence. Do not reintroduce broad scans or expose a bypass through the CLI.
+- Wallet entries require fresh convergence of the watched wallets. Do not reintroduce broad scans or expose a bypass through the CLI.
+- A Fabriq HOT alert opens its own signal with no screening deadline. It still has to pass every entry filter. Wallet pursuits take priority when `maxActiveSignals` is full, and a Fabriq pursuit ends when no newer alert arrives within `staleAfterSec`.
 - This build forces shadow mode and `DRY_RUN=true`. `transactionsAreDryRun()` stays true. Do not load `walletKey` into `WALLET_PRIVATE_KEY`.
 - Missing data must not be interpreted as empty positions or spendable funds.
 - Keep entry screening independent of exit polling. Serialize wallet mutations through the existing queue.

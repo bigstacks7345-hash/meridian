@@ -5,6 +5,7 @@
     "This build forces shadow mode and DRY_RUN=true. It does not load walletKey.",
     "The volume profile is a TradingView visible-range VPVR equivalent built from 1440 one-minute bars.",
     "candleProvider none fails closed. gmgn and the stubbed birdeye adapter are selectable.",
+    "Fabriq HOT is a separate trigger. It uses the same entry filters and does not replace the two-wallet rule.",
     "Do not put a private key in this file."
   ],
   "shadowMode": true,
@@ -20,6 +21,8 @@
     "fabriq": {
       "enabled": true,
       "pollSec": 20,
+      "staleAfterSec": 1800,
+      "maxActive": 3,
       "channel": "fabriqalert"
     }
   },

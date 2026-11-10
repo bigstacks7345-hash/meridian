@@ -3,9 +3,19 @@
 import { canOpen, entryRange, evaluateEntry, evaluateExit, lockPoc, positionLegs, resolveQuotePnl, watchedConvergence } from "./rules.js";
 
 export function planShadowEntry({ signal, snapshot, book = [], rules, now }) {
-  const matches = watchedConvergence(signal?.events || [], rules, now).filter(match => match.mint === signal?.mint);
-  const match = matches[0];
-  if (!match) return { ok: false, terminal: true, reason: "watched-wallet convergence not met" };
+  const fabriq = signal?.source === "fabriq";
+  let wallets = [];
+  let pools = [];
+  if (fabriq) {
+    const pool = signal.pool || snapshot?.poolAddress || null;
+    pools = pool ? [pool] : [];
+  } else {
+    const matches = watchedConvergence(signal?.events || [], rules, now).filter(match => match.mint === signal?.mint);
+    const match = matches[0];
+    if (!match) return { ok: false, terminal: true, reason: "watched-wallet convergence not met" };
+    wallets = match.wallets;
+    pools = [...new Set(match.events.map(event => event.pool))];
+  }
   const entry = evaluateEntry(snapshot, rules);
   if (!entry.pass) return { ok: false, terminal: false, reason: entry.reasons.join("; ") || "entry filters failed" };
   const range = entryRange(snapshot.livePrice, entry.display.supertrend.support, snapshot.binStep, rules);
@@ -18,10 +28,11 @@ export function planShadowEntry({ signal, snapshot, book = [], rules, now }) {
     status: "proposed",
     submitted: false,
     mint: signal.mint,
-    poolAddress: snapshot.poolAddress || null,
+    poolAddress: (fabriq && signal.pool) || snapshot.poolAddress || signal.pool || null,
     openedAt: now,
-    wallets: [...match.wallets].sort(),
-    pools: [...new Set(match.events.map(event => event.pool))].sort(),
+    source: fabriq ? "fabriq" : "wallets",
+    wallets: [...wallets].sort(),
+    pools: [...pools].sort(),
     priceDenomination: "quote",
     quoteMint: rules.quoteMint,
     pnlDenomination: "quote",
