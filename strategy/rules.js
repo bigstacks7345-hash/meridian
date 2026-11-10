@@ -1,6 +1,6 @@
 // Pure owner-strategy decisions. Missing inputs fail closed. Nothing here signs or broadcasts.
 
-import { bollinger, continuousSeries, rsiWithSma, sma, supertrend, volumeAboveSma, volumeProfile } from "./indicators.js";
+import { bollinger, rsiWithSma, sma, supertrend, volumeAboveSma, volumeProfile } from "./indicators.js";
 
 function num(value) {
   const n = Number(value);
@@ -93,7 +93,12 @@ export function evaluateEntry(snapshot, rules) {
     offset: rules.bollingerOffset,
   }) : null;
 
-  const series = continuousSeries(snapshot.closed1m, 60_000, rules.pocExpectedBars);
+  const series = selectProfileWindow(snapshot.closed1m, {
+    createdAt: snapshot.createdAt,
+    asOf: snapshot.asOf,
+    lookbackMs: rules.pocLookbackHours * 3_600_000,
+    toleranceMs: rules.pocLaunchToleranceMs,
+  });
   let profile = null;
   if (!series.ok) reasons.push(series.reason);
   else {
@@ -183,6 +188,37 @@ export function lockPoc(profile, entryPrice, rules) {
 
 // Same-tick tie break, in time-independent order: stop, hard target, trail, POC.
 // A replay steps ticks in order, so the first tick that qualifies is the exit.
+// Younger than the lookback: every 1m bar from creation. Older: the prior 24h only.
+// A young token whose first bar is more than about a minute after creation is missing
+// its launch and cannot be profiled.
+export function selectProfileWindow(candles, { createdAt, asOf, lookbackMs, toleranceMs, intervalMs = 60_000 } = {}) {
+  if (!Array.isArray(candles) || candles.length === 0) return { ok: false, reason: "1m history incomplete" };
+  const created = num(createdAt);
+  if (created == null) return { ok: false, reason: "token creation time unavailable" };
+  const sorted = [...candles].sort((a, b) => a.t - b.t);
+  for (let i = 1; i < sorted.length; i++) {
+    if (!Number.isFinite(sorted[i]?.t) || sorted[i].t - sorted[i - 1].t !== intervalMs) {
+      return { ok: false, reason: "1m history has a gap" };
+    }
+  }
+  const first = sorted[0].t;
+  const last = sorted[sorted.length - 1].t;
+  const end = num(asOf) ?? last + intervalMs;
+  if (end <= created) return { ok: false, reason: "token creation time unavailable" };
+  if (end - created <= lookbackMs) {
+    if (first > created + toleranceMs || first < created - toleranceMs) {
+      return { ok: false, reason: "launch 1m history is missing" };
+    }
+    return { ok: true, candles: sorted.filter(candle => candle.t < end), young: true };
+  }
+  const start = end - lookbackMs;
+  const selected = sorted.filter(candle => candle.t >= start && candle.t < end);
+  if (selected.length !== lookbackMs / intervalMs || selected[0]?.t !== start) {
+    return { ok: false, reason: "1m history incomplete" };
+  }
+  return { ok: true, candles: selected, young: false };
+}
+
 export function quoteMovePct(entryQuote, markQuote) {
   const entry = num(entryQuote);
   const mark = num(markQuote);

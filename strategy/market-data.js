@@ -218,6 +218,37 @@ export async function fetchQuoteGmgn1m(args) {
   return { ...converted, priceDenomination: "quote" };
 }
 
+export function parseTokenCreatedAt(body) {
+  const data = body?.data && typeof body.data === "object" && !Array.isArray(body.data) ? body.data : body;
+  const raw = data?.creation_timestamp ?? data?.created_timestamp ?? data?.open_timestamp ?? data?.creation_time ?? data?.created_at;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return { ok: false, reason: "token creation time unavailable" };
+  return { ok: true, createdAt: n < 1e12 ? n * 1000 : n };
+}
+
+export async function fetchTokenCreatedAt({ rules, mint, fetchImpl, sleep = () => Promise.resolve(), now = Date.now, budget, apiKey = "" }) {
+  const stamp = now();
+  const cost = rules.gmgnInfoCreditCost ?? 1;
+  if (!budget.take(cost, stamp)) {
+    const wait = budget.waitMs(cost, stamp);
+    if (wait == null) return { ok: false, reason: "gmgn credit window exhausted" };
+    await sleep(wait);
+    if (!budget.take(cost, now())) return { ok: false, reason: "gmgn credit window exhausted" };
+  }
+  const url = new URL(rules.gmgnTokenInfoPath, rules.gmgnBaseUrl);
+  url.searchParams.set("chain", rules.gmgnChain);
+  url.searchParams.set("address", mint);
+  let response;
+  try {
+    response = await fetchImpl(url, { headers: apiKey ? { "X-APIKEY": apiKey } : {} });
+  } catch (error) {
+    return { ok: false, reason: `gmgn request failed: ${error.message}` };
+  }
+  if (response.status === 429) return { ok: false, reason: "gmgn 429; stopped" };
+  if (!response.ok) return { ok: false, reason: `gmgn status ${response.status}` };
+  return parseTokenCreatedAt(await response.json());
+}
+
 export function gmgnMarketData(rules, deps = {}) {
   const budget = deps.budget || createRequestBudget(rules);
   return {
@@ -228,6 +259,8 @@ export function gmgnMarketData(rules, deps = {}) {
       const to = window.to;
       const from = window.from;
       if (to == null || from == null) return { ok: false, reason: "gmgn window is incomplete" };
+      const created = await fetchTokenCreatedAt({ ...deps, rules, mint, budget, apiKey });
+      if (!created.ok) return created;
       const series = await fetchQuoteGmgn1m({ ...deps, rules, mint, from, to, budget, apiKey });
       if (!series.ok) return series;
       return {
@@ -236,6 +269,7 @@ export function gmgnMarketData(rules, deps = {}) {
         quoteMint: rules.quoteMint,
         quoteSymbol: rules.quoteSymbol,
         volumeDenomination: "usd",
+        createdAt: created.createdAt,
         closed1m: series.candles,
         closed5m: completed5m(series.candles),
       };

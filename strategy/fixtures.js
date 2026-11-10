@@ -30,7 +30,14 @@ export function passingMinuteHistory(start = 0) {
     c: price + 0.2,
     v: 50_000,
   };
-  return { closed1m, current1m, closed5m: completed5m(closed1m), livePrice: current1m.c };
+  return {
+    closed1m,
+    current1m,
+    closed5m: completed5m(closed1m),
+    livePrice: current1m.c,
+    createdAt: closed1m[0].t,
+    asOf: current1m.t,
+  };
 }
 
 export function passingSnapshot(mint = "MintReplay11111111111111111111111111111111") {

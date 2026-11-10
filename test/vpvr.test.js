@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import { supertrend, volumeProfile } from "../strategy/indicators.js";
-import { lockPoc } from "../strategy/rules.js";
+import { lockPoc, selectProfileWindow } from "../strategy/rules.js";
 import {
   birdeyeMarketData,
   buildBirdeyeOhlcvRequest,
@@ -253,6 +254,34 @@ test("quote candle fetch pages the token and wrapped SOL on one credit budget", 
   assert.equal(calls.filter(address => address === "TokenMint").length, 3);
   assert.equal(calls.filter(address => address === rules.quoteMint).length, 3);
   assert.ok(sleeps.length >= 1);
+});
+
+test("AIcoin full-life SOL profile matches the GMGN chart row", () => {
+  const bars = JSON.parse(fs.readFileSync(new URL("./fixtures/aicoin-1m-sol.json", import.meta.url), "utf8"));
+  const createdAt = bars[0].t;
+  const window = selectProfileWindow(bars, {
+    createdAt,
+    asOf: bars.at(-1).t + 60_000,
+    lookbackMs: 24 * 3_600_000,
+    toleranceMs: 60_000,
+  });
+  assert.equal(window.ok, true);
+  assert.equal(window.young, true);
+  assert.equal(window.candles.length, 144);
+  const profile = volumeProfile(window.candles, { rows: 24, valueArea: 0.7 });
+  const row = profile.rows[profile.pocRow];
+  assert.ok(Math.abs(profile.poc - 0.000001239) < 5e-10);
+  assert.ok(Math.abs(row.low - 0.000001131) < 5e-9);
+  assert.ok(Math.abs(row.high - 0.000001348) < 5e-9);
+  const clipped = bars.slice(40);
+  const missingLaunch = selectProfileWindow(clipped, {
+    createdAt,
+    asOf: bars.at(-1).t + 60_000,
+    lookbackMs: 24 * 3_600_000,
+    toleranceMs: 60_000,
+  });
+  assert.equal(missingLaunch.ok, false);
+  assert.match(missingLaunch.reason, /launch/);
 });
 
 test("Birdeye adapter is configurable, stubbed, and sends no API key", async () => {

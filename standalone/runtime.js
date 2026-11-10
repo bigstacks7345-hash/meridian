@@ -114,6 +114,7 @@ async function attemptOwnerEntry(signal) {
   }
   const decision = planShadowEntry({ signal, snapshot, book, rules, now });
   if (!decision.ok) {
+    log("entry", `shadow skip ${signal.mint.slice(0, 8)}: ${decision.reason}`);
     if (decision.terminal) {
       finishSignal(store, signal, decision.reason);
       return null;
