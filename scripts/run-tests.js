@@ -45,6 +45,7 @@ const steps = [
     "test/decisions.test.js",
     "test/state-isolation.test.js",
     "test/entry-guards.test.js",
+    "test/liquidity-sim.test.js",
   ]],
 ];
 

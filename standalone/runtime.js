@@ -23,7 +23,8 @@ import { recordPositionSnapshot } from "../pool-memory.js";
 import { getDeterministicCloseRule, computeBinsBelow } from "../exit-rules.js";
 import { startAdmin } from "./telegram-admin.js";
 import { planShadowEntry, stepShadowBook } from "../strategy/shadow.js";
-import { recordExit, recordScreening } from "./decisions.js";
+import { liquidityCloseSummary, simulateLiquidity } from "../strategy/liquidity-management.js";
+import { recordExit, recordLiquidity, recordScreening } from "./decisions.js";
 import { createGmgnGate, createMarketData, createRequestBudget } from "../strategy/market-data.js";
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -404,6 +405,31 @@ async function attachPoolVolume(signal, snapshot) {
   }
 }
 
+function noteShadowLiquidity(livePositions) {
+  if (!store?.data?.shadowBook?.length) return;
+  const now = Date.now();
+  let changed = false;
+  store.data.shadowBook = store.data.shadowBook.map(position => {
+    if (position.status !== "proposed") return position;
+    const live = livePositions.find(item => item.base_mint === position.mint || item.position === position.id);
+    if (!live || live.active_bin == null && live.unclaimed_fees_usd == null) return position;
+    const simulated = simulateLiquidity(position, {
+      at: now,
+      activeBin: live.active_bin,
+      lowerBin: live.lower_bin,
+      upperBin: live.upper_bin,
+      unclaimedFeesUsd: live.unclaimed_fees_usd,
+      solPriceUsd: live.sol_price_usd ?? null,
+    }, config.ownerStrategy, now);
+    if (simulated.events.length) changed = true;
+    for (const event of simulated.events) {
+      try { recordLiquidity(event, now); } catch (error) { log("decision", `liquidity log failed: ${error.message}`); }
+    }
+    return simulated.position;
+  });
+  if (changed) store.save();
+}
+
 function safeScreeningLog(input) {
   try { return recordScreening(input); }
   catch (error) { log("decision", `screening log failed: ${error.message}`); return null; }
@@ -415,12 +441,27 @@ function safeExitLog(input) {
 }
 
 export function reviewShadowBook(book, tick) {
-  const stepped = stepShadowBook(book, tick, config.ownerStrategy);
+  const now = tick?.at ?? Date.now();
+  const managed = applyShadowLiquidity(book, tick, now);
+  const stepped = stepShadowBook(managed, tick, config.ownerStrategy);
   for (const exit of stepped.exits) {
     const position = stepped.book.find(item => item.id === exit.id);
-    safeExitLog({ now: tick?.at ?? Date.now(), position, reason: exit.reason, pnlPct: position?.pnlPct, exitPrice: tick?.quotePrice });
+    safeExitLog({ now, position, reason: exit.reason, pnlPct: position?.pnlPct, exitPrice: tick?.quotePrice });
+    try { recordLiquidity(liquidityCloseSummary(position, now), now); } catch (error) { log("decision", `liquidity summary failed: ${error.message}`); }
   }
   return stepped;
+}
+
+function applyShadowLiquidity(book, observation, now) {
+  return (book || []).map(position => {
+    if (position?.status !== "proposed") return position;
+    if (observation?.activeBin == null && observation?.unclaimedFeesUsd == null) return position;
+    const simulated = simulateLiquidity(position, observation, config.ownerStrategy, now);
+    for (const event of simulated.events) {
+      try { recordLiquidity(event, now); } catch (error) { log("decision", `liquidity log failed: ${error.message}`); }
+    }
+    return simulated.position;
+  });
 }
 
 async function attemptLegacyEntry(signal) {
@@ -563,6 +604,7 @@ export async function manageOnce() {
       return null;
     }
     syncOpenPositions(live.positions.map(p => p.position));
+    noteShadowLiquidity(live.positions);
     if (live.positions.length === 0) return "No open positions";
     for (const p of live.positions) {
       recordPositionSnapshot(p.pool, p);
@@ -605,6 +647,7 @@ function startPnlPoller() {
     try {
       const live = await getMyPositions({ force: true, silent: true }).catch(() => null);
       if (!live?.positions?.length) return;
+      noteShadowLiquidity(live.positions);
       for (const p of live.positions) {
         confirmPeak(p.position, p.pnl_pct, confirmTicks);
         const exit = updatePnlAndCheckExits(p.position, p, config.management);

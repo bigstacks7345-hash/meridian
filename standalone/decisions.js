@@ -225,6 +225,10 @@ export function buildExitRecord({ now = Date.now(), position, reason, pnlPct, ex
   };
 }
 
+export function recordLiquidity(event, now = Date.now()) {
+  return appendDecision({ ...event, simulated: true, executed: false, executionDisabled: true }, now);
+}
+
 export function recordExit(input) {
   const now = input.now ?? Date.now();
   const record = buildExitRecord({ ...input, now });

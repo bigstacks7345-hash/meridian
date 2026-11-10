@@ -65,8 +65,11 @@ function mergeOwnerStrategy(overrides) {
   const source = overrides && typeof overrides === "object" ? overrides : {};
   const merged = { ...OWNER_STRATEGY, ...source };
   if (!Array.isArray(source.wallets) || source.wallets.length === 0) merged.wallets = OWNER_STRATEGY.wallets;
-  merged.crashGuard = { ...OWNER_STRATEGY.crashGuard, ...(source.crashGuard && typeof source.crashGuard === "object" ? source.crashGuard : {}) };
-  merged.poolDepth = { ...OWNER_STRATEGY.poolDepth, ...(source.poolDepth && typeof source.poolDepth === "object" ? source.poolDepth : {}) };
+  for (const key of ["crashGuard", "poolDepth", "autoCompound", "reshapeLiquidity"]) {
+    const override = source[key];
+    merged[key] = { ...OWNER_STRATEGY[key], ...(override && typeof override === "object" ? override : {}) };
+    merged[key].execute = false;
+  }
   return merged;
 }
 const ownerStrategy = mergeOwnerStrategy(u.ownerStrategy);

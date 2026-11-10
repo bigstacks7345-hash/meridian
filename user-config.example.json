@@ -7,6 +7,7 @@
     "candleProvider none fails closed. gmgn and the stubbed birdeye adapter are selectable.",
     "Fabriq HOT is a separate trigger. It uses the same entry filters and does not replace the two-wallet rule.",
     "crashGuard rejects a SOL price more than maxDrawdownPct below the lookback high. poolDepth rejects a pool whose own 5m volume divided by its liquidity exceeds maxVolToLiq5m.",
+    "autoCompound and reshapeLiquidity are shadow simulations. execute is forced off and no transaction is built.",
     "The first Fabriq poll ignores posts older than pollSec*3. staleAfterSec ends an open pursuit that gets no newer alert.",
     "Do not put a private key in this file."
   ],
@@ -193,6 +194,27 @@
     "poolDepth": {
       "enabled": true,
       "maxVolToLiq5m": 15
+    },
+    "autoCompound": {
+      "enabled": true,
+      "simulateOnly": true,
+      "execute": false,
+      "minFeesUsd": 5,
+      "shape": "spot",
+      "requireFeesExceedCostX": 3,
+      "baseFeeSol": 0.000005,
+      "priorityFeeSol": 0.00002,
+      "rentSol": 0
+    },
+    "reshapeLiquidity": {
+      "enabled": true,
+      "simulateOnly": true,
+      "execute": false,
+      "allowedBinMovement": 5,
+      "startShape": "curve",
+      "flipBufferBins": 2,
+      "alternateShape": "spot_bidask_5050",
+      "minIntervalSec": 60
     },
     "birdeyeEnabled": false,
     "birdeyeBaseUrl": "https://public-api.birdeye.so",
