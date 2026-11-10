@@ -155,6 +155,8 @@ function indicatorsOf(snapshot, rules) {
       upper: finite(display.bollinger.upper),
       lower: finite(display.bollinger.lower),
     } : null,
+    crashDrawdownPct: finite(display.crashGuard?.drawdownPct),
+    poolVolToLiq5m: finite(display.poolDepth?.volToLiq),
   };
 }
 

@@ -48,6 +48,7 @@ export function passingSnapshot(mint = "MintReplay111111111111111111111111111111
     poolAddress: "PoolReplay111111111111111111111111111111111",
     binStep: 100,
     liquidityUsd: 50_000,
+    poolVolume5mUsd: 100_000,
     mcapUsd: 400_000,
     holders: 2_000,
     priceDenomination: "quote",

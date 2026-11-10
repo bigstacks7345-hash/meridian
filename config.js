@@ -65,6 +65,8 @@ function mergeOwnerStrategy(overrides) {
   const source = overrides && typeof overrides === "object" ? overrides : {};
   const merged = { ...OWNER_STRATEGY, ...source };
   if (!Array.isArray(source.wallets) || source.wallets.length === 0) merged.wallets = OWNER_STRATEGY.wallets;
+  merged.crashGuard = { ...OWNER_STRATEGY.crashGuard, ...(source.crashGuard && typeof source.crashGuard === "object" ? source.crashGuard : {}) };
+  merged.poolDepth = { ...OWNER_STRATEGY.poolDepth, ...(source.poolDepth && typeof source.poolDepth === "object" ? source.poolDepth : {}) };
   return merged;
 }
 const ownerStrategy = mergeOwnerStrategy(u.ownerStrategy);

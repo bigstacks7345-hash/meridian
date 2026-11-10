@@ -107,7 +107,73 @@ export function evaluateEntry(snapshot, rules) {
   }
   display.profile = profile;
 
+  const crash = crashDrawdown(snapshot, rules);
+  display.crashGuard = crash;
+  if (!crash.ok && crash.reason) reasons.push(crash.reason);
+  const depth = poolDepth(snapshot, rules);
+  display.poolDepth = depth;
+  if (!depth.ok && depth.reason) reasons.push(depth.reason);
+
   return { pass: reasons.length === 0, reasons, display };
+}
+
+export function crashDrawdown(snapshot, rules = {}) {
+  const guard = rules.crashGuard || {};
+  const lookbackMin = Number(guard.lookbackMin) > 0 ? Number(guard.lookbackMin) : 30;
+  const maxDrawdownPct = Number.isFinite(Number(guard.maxDrawdownPct)) ? Number(guard.maxDrawdownPct) : 60;
+  const enabled = guard.enabled !== false;
+  const price = num(snapshot?.livePrice);
+  const bars = [
+    ...(Array.isArray(snapshot?.closed1m) ? snapshot.closed1m : []),
+    ...(snapshot?.current1m ? [snapshot.current1m] : []),
+  ].filter(bar => Number.isFinite(bar?.t) && num(bar.h) != null && num(bar.h) > 0);
+  if (price == null || price <= 0 || bars.length === 0) {
+    return { ok: !enabled, enabled, drawdownPct: null, lookbackMin, maxDrawdownPct, high: null, price, reason: enabled ? "crash guard lookback unavailable" : null };
+  }
+  const end = Math.max(...bars.map(bar => bar.t));
+  const start = end - (lookbackMin - 1) * 60_000;
+  const window = bars.filter(bar => bar.t >= start && bar.t <= end);
+  if (window.length === 0) {
+    return { ok: !enabled, enabled, drawdownPct: null, lookbackMin, maxDrawdownPct, high: null, price, reason: enabled ? "crash guard lookback unavailable" : null };
+  }
+  const high = Math.max(...window.map(bar => bar.h));
+  const drawdownPct = Math.round((high - price) / high * 1000) / 10;
+  const breached = drawdownPct > maxDrawdownPct;
+  return {
+    ok: !enabled || !breached,
+    enabled,
+    drawdownPct,
+    high,
+    price,
+    lookbackMin,
+    maxDrawdownPct,
+    reason: enabled && breached ? `crash guard: price is ${drawdownPct}% below the ${lookbackMin}m high` : null,
+  };
+}
+
+export function poolDepth(snapshot, rules = {}) {
+  const guard = rules.poolDepth || {};
+  const maxVolToLiq5m = Number(guard.maxVolToLiq5m) > 0 ? Number(guard.maxVolToLiq5m) : 10;
+  const enabled = guard.enabled !== false;
+  const volume = presentNumber(snapshot?.poolVolume5mUsd);
+  const liquidity = presentNumber(snapshot?.poolLiquidityUsd ?? snapshot?.liquidityUsd);
+  if (volume == null || volume < 0) {
+    return { ok: !enabled, enabled, volToLiq: null, volume5mUsd: null, liquidityUsd: liquidity, maxVolToLiq5m, reason: enabled ? "pool 5m volume unavailable; not using token volume" : null };
+  }
+  if (liquidity == null || liquidity <= 0) {
+    return { ok: !enabled, enabled, volToLiq: null, volume5mUsd: volume, liquidityUsd: null, maxVolToLiq5m, reason: enabled ? "pool liquidity unavailable for depth check" : null };
+  }
+  const volToLiq = Math.round(volume / liquidity * 100) / 100;
+  const breached = volToLiq > maxVolToLiq5m;
+  return {
+    ok: !enabled || !breached,
+    enabled,
+    volToLiq,
+    volume5mUsd: volume,
+    liquidityUsd: liquidity,
+    maxVolToLiq5m,
+    reason: enabled && breached ? `pool depth: 5m volume/liquidity ${volToLiq} exceeds ${maxVolToLiq5m}` : null,
+  };
 }
 
 export function entryRange(entryPrice, support, binStep, rules) {
@@ -155,6 +221,11 @@ export function positionLegs(rules) {
       { strategy: "bid_ask", amountSol: bidAsk, amountToken: 0 },
     ],
   };
+}
+
+function presentNumber(value) {
+  if (value == null || value === "") return null;
+  return num(value);
 }
 
 function roundSol(value) {

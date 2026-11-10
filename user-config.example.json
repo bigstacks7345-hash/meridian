@@ -6,6 +6,7 @@
     "The volume profile is a TradingView visible-range VPVR equivalent built from 1440 one-minute bars.",
     "candleProvider none fails closed. gmgn and the stubbed birdeye adapter are selectable.",
     "Fabriq HOT is a separate trigger. It uses the same entry filters and does not replace the two-wallet rule.",
+    "crashGuard rejects a SOL price more than maxDrawdownPct below the lookback high. poolDepth rejects a pool whose own 5m volume divided by its liquidity exceeds maxVolToLiq5m.",
     "The first Fabriq poll ignores posts older than pollSec*3. staleAfterSec ends an open pursuit that gets no newer alert.",
     "Do not put a private key in this file."
   ],
@@ -184,6 +185,15 @@
     "gmgnTokenInfoPath": "/v1/token/info",
     "gmgnInfoCreditCost": 1,
     "candleCacheMs": 60000,
+    "crashGuard": {
+      "enabled": true,
+      "maxDrawdownPct": 60,
+      "lookbackMin": 30
+    },
+    "poolDepth": {
+      "enabled": true,
+      "maxVolToLiq5m": 10
+    },
     "birdeyeEnabled": false,
     "birdeyeBaseUrl": "https://public-api.birdeye.so",
     "birdeyePath": "/defi/v3/ohlcv",

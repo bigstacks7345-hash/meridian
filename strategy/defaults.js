@@ -92,6 +92,15 @@ export const OWNER_STRATEGY = {
   gmgnTokenInfoPath: "/v1/token/info",
   gmgnInfoCreditCost: 1,
   candleCacheMs: 60_000,
+  crashGuard: {
+    enabled: true,
+    maxDrawdownPct: 60,
+    lookbackMin: 30,
+  },
+  poolDepth: {
+    enabled: true,
+    maxVolToLiq5m: 10,
+  },
   birdeyeEnabled: false,
   birdeyeBaseUrl: "https://public-api.birdeye.so",
   birdeyePath: "/defi/v3/ohlcv",

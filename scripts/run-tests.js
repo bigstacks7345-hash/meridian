@@ -44,6 +44,7 @@ const steps = [
     "test/fabriq.test.js",
     "test/decisions.test.js",
     "test/state-isolation.test.js",
+    "test/entry-guards.test.js",
   ]],
 ];
 

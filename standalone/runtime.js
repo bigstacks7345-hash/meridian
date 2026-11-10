@@ -354,6 +354,7 @@ async function attemptOwnerEntry(signal) {
   }
   if (signal.done) return null;
   if (signal.pool && snapshot?.ok) snapshot = { ...snapshot, poolAddress: signal.pool };
+  snapshot = await attachPoolVolume(signal, snapshot);
   const decision = planShadowEntry({ signal, snapshot, book, rules, now });
   const logged = safeScreeningLog({ now, signal, snapshot, book, rules, result: decision, reason: decision.ok ? "shadow proposal recorded" : decision.reason });
   if (decision.proposal && logged) decision.proposal.decisionId = logged.id;
@@ -383,6 +384,24 @@ async function attemptOwnerEntry(signal) {
   log("entry", `[SHADOW] Would open ${decision.proposal.totalSol} SOL (${decision.proposal.legs.map(leg => `${leg.strategy} ${leg.amountSol}`).join(" + ")}) on ${signal.mint.slice(0, 8)}; nothing submitted`);
   notifyAbout(signal, `🕯️ Shadow proposal (${sourceLabel(signal)}): ${decision.proposal.totalSol} SOL split ${decision.proposal.legs.map(leg => `${leg.amountSol} ${leg.strategy}`).join(" + ")} on ${signal.mint.slice(0, 8)}. Not submitted.`);
   return null;
+}
+
+async function attachPoolVolume(signal, snapshot) {
+  if (!snapshot?.ok || snapshot.poolVolume5mUsd != null) return snapshot;
+  const pool = signal.pool || snapshot.poolAddress;
+  if (!pool) return snapshot;
+  try {
+    const detail = await poolDetail(pool, "5m");
+    const volume = Number(detail?.volume);
+    const liquidity = Number(detail?.tvl);
+    return {
+      ...snapshot,
+      poolVolume5mUsd: Number.isFinite(volume) ? volume : null,
+      poolLiquidityUsd: Number.isFinite(liquidity) && liquidity > 0 ? liquidity : snapshot.poolLiquidityUsd,
+    };
+  } catch {
+    return snapshot;
+  }
 }
 
 function safeScreeningLog(input) {
