@@ -87,6 +87,41 @@ export function gmgnKlineUrl(rules, { mint, from, to }) {
   return url;
 }
 
+export function createGmgnGate() {
+  return { pausedUntil: 0 };
+}
+
+export function headerValue(response, name) {
+  const headers = response?.headers;
+  if (!headers) return null;
+  if (typeof headers.get === "function") return headers.get(name) ?? headers.get(name.toLowerCase());
+  const found = Object.keys(headers).find(key => key.toLowerCase() === name.toLowerCase());
+  return found ? headers[found] : null;
+}
+
+export function parseGmgnResetAt(response, body, now) {
+  const retryAfter = headerValue(response, "retry-after");
+  if (retryAfter != null && retryAfter !== "") {
+    if (/^\d+(\.\d+)?$/.test(String(retryAfter).trim())) return now + Number(retryAfter) * 1000;
+    const dated = Date.parse(retryAfter);
+    if (Number.isFinite(dated)) return dated;
+  }
+  const resetHeader = headerValue(response, "x-ratelimit-reset") ?? headerValue(response, "ratelimit-reset");
+  const bodyReset = body?.retry_after ?? body?.reset ?? body?.reset_at ?? body?.data?.retry_after ?? body?.data?.reset ?? body?.data?.reset_at;
+  const raw = resetHeader ?? bodyReset;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  if (n > 1e12) return n;
+  if (n > 1e9) return n * 1000;
+  return now + n * 1000;
+}
+
+async function waitForGmgn(gate, now, sleep) {
+  if (!gate) return;
+  const wait = gate.pausedUntil - now();
+  if (wait > 0) await sleep(wait);
+}
+
 export async function fetchGmgn1m({
   rules,
   mint,
@@ -97,19 +132,23 @@ export async function fetchGmgn1m({
   now = Date.now,
   budget = createRequestBudget(rules),
   apiKey = "",
+  gate = null,
+  cache = null,
+  deadline = null,
 }) {
   if (!(to > from) || (to - from) % 60_000 !== 0) return { ok: false, reason: "1m window is invalid" };
+  const cacheKey = `raw:${mint}:${from}:${to}`;
+  const cached = cache?.get(cacheKey);
+  if (cached && now() - cached.at < (rules.candleCacheMs ?? 60_000)) return cached.value;
   const pageMs = rules.gmgnPageBars * 60_000;
   const cost = rules.gmgnCandleCreditCost;
   let cursor = to;
-  let stopped = false;
   const collected = [];
   while (cursor > from) {
-    if (stopped) return { ok: false, reason: "gmgn 429; stopped" };
     const pageFrom = Math.max(from, cursor - pageMs);
-    const stamp = now();
-    if (!budget.take(cost, stamp)) {
-      const wait = budget.waitMs(cost, stamp);
+    await waitForGmgn(gate, now, sleep);
+    if (!budget.take(cost, now())) {
+      const wait = budget.waitMs(cost, now());
       if (wait == null) return { ok: false, reason: "gmgn credit window exhausted" };
       await sleep(wait);
       if (!budget.take(cost, now())) return { ok: false, reason: "gmgn credit window exhausted" };
@@ -124,8 +163,14 @@ export async function fetchGmgn1m({
       return { ok: false, reason: `gmgn request failed: ${error.message}` };
     }
     if (response.status === 429) {
-      stopped = true;
-      return { ok: false, reason: "gmgn 429; stopped" };
+      const body = await response.json?.().catch(() => null);
+      const resetAt = parseGmgnResetAt(response, body, now()) ?? now() + (rules.gmgnWindowMs ?? 1000);
+      if (gate) gate.pausedUntil = Math.max(gate.pausedUntil, resetAt);
+      if (deadline != null && resetAt <= deadline) {
+        await sleep(Math.max(0, resetAt - now()));
+        continue;
+      }
+      return { ok: false, reason: "gmgn 429; paused until reset" };
     }
     if (!response.ok) return { ok: false, reason: `gmgn status ${response.status}` };
     const parsed = parseGmgnKlines(await response.json(), rules.gmgnUsdField);
@@ -135,7 +180,9 @@ export async function fetchGmgn1m({
   }
   const merged = dedupeCandles(collected.filter(candle => candle.t >= from && candle.t < to));
   if (!merged.ok) return merged;
-  return continuousSeries(merged.candles, 60_000, (to - from) / 60_000);
+  const series = continuousSeries(merged.candles, 60_000, (to - from) / 60_000);
+  if (series.ok) cache?.set(cacheKey, { at: now(), value: series });
+  return series;
 }
 
 function dedupeCandles(candles) {
@@ -226,11 +273,14 @@ export function parseTokenCreatedAt(body) {
   return { ok: true, createdAt: n < 1e12 ? n * 1000 : n };
 }
 
-export async function fetchTokenCreatedAt({ rules, mint, fetchImpl, sleep = () => Promise.resolve(), now = Date.now, budget, apiKey = "" }) {
-  const stamp = now();
+export async function fetchTokenCreatedAt({ rules, mint, fetchImpl, sleep = () => Promise.resolve(), now = Date.now, budget, apiKey = "", gate = null, cache = null, deadline = null }) {
+  const cacheKey = `created:${mint}`;
+  const cached = cache?.get(cacheKey);
+  if (cached && now() - cached.at < (rules.candleCacheMs ?? 60_000)) return cached.value;
   const cost = rules.gmgnInfoCreditCost ?? 1;
-  if (!budget.take(cost, stamp)) {
-    const wait = budget.waitMs(cost, stamp);
+  await waitForGmgn(gate, now, sleep);
+  if (!budget.take(cost, now())) {
+    const wait = budget.waitMs(cost, now());
     if (wait == null) return { ok: false, reason: "gmgn credit window exhausted" };
     await sleep(wait);
     if (!budget.take(cost, now())) return { ok: false, reason: "gmgn credit window exhausted" };
@@ -244,9 +294,20 @@ export async function fetchTokenCreatedAt({ rules, mint, fetchImpl, sleep = () =
   } catch (error) {
     return { ok: false, reason: `gmgn request failed: ${error.message}` };
   }
-  if (response.status === 429) return { ok: false, reason: "gmgn 429; stopped" };
+  if (response.status === 429) {
+    const body = await response.json?.().catch(() => null);
+    const resetAt = parseGmgnResetAt(response, body, now()) ?? now() + (rules.gmgnWindowMs ?? 1000);
+    if (gate) gate.pausedUntil = Math.max(gate.pausedUntil, resetAt);
+    if (deadline != null && resetAt <= deadline) {
+      await sleep(Math.max(0, resetAt - now()));
+      return fetchTokenCreatedAt({ rules, mint, fetchImpl, sleep, now, budget, apiKey, gate, cache, deadline });
+    }
+    return { ok: false, reason: "gmgn 429; paused until reset" };
+  }
   if (!response.ok) return { ok: false, reason: `gmgn status ${response.status}` };
-  return parseTokenCreatedAt(await response.json());
+  const parsed = parseTokenCreatedAt(await response.json());
+  if (parsed.ok) cache?.set(cacheKey, { at: now(), value: parsed });
+  return parsed;
 }
 
 export function gmgnMarketData(rules, deps = {}) {
@@ -254,16 +315,23 @@ export function gmgnMarketData(rules, deps = {}) {
   return {
     id: "gmgn",
     async snapshot(mint, window = {}) {
-      const apiKey = deps.apiKey ?? "";
+      const apiKey = deps.apiKey ?? process.env.GMGN_API_KEY ?? "";
       if (!apiKey) return { ok: false, reason: "gmgn api key is not configured" };
-      const to = window.to;
-      const from = window.from;
-      if (to == null || from == null) return { ok: false, reason: "gmgn window is incomplete" };
-      const created = await fetchTokenCreatedAt({ ...deps, rules, mint, budget, apiKey });
+      const clock = deps.now ?? Date.now;
+      const to = window.to ?? clock() - (clock() % 60_000);
+      const deadline = window.deadline ?? deps.deadline ?? null;
+      const created = await fetchTokenCreatedAt({ ...deps, rules, mint, budget, apiKey, deadline });
       if (!created.ok) return created;
-      const series = await fetchQuoteGmgn1m({ ...deps, rules, mint, from, to, budget, apiKey });
+      const lookbackStart = to - rules.pocLookbackHours * 3_600_000;
+      const lifeStart = created.createdAt - (created.createdAt % 60_000);
+      const from = Math.max(window.from ?? lookbackStart, lifeStart);
+      if (!(to > from)) return { ok: false, reason: "gmgn window is incomplete" };
+      const cacheKey = `quote:${mint}:${from}:${to}`;
+      const cached = deps.cache?.get(cacheKey);
+      if (cached && clock() - cached.at < (rules.candleCacheMs ?? 60_000)) return cached.value;
+      const series = await fetchQuoteGmgn1m({ ...deps, rules, mint, from, to, budget, apiKey, deadline });
       if (!series.ok) return series;
-      return {
+      const value = {
         ok: true,
         priceDenomination: "quote",
         quoteMint: rules.quoteMint,
@@ -273,6 +341,8 @@ export function gmgnMarketData(rules, deps = {}) {
         closed1m: series.candles,
         closed5m: completed5m(series.candles),
       };
+      deps.cache?.set(cacheKey, { at: clock(), value });
+      return value;
     },
   };
 }

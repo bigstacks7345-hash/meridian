@@ -1,14 +1,19 @@
 import fs from "fs";
+import path from "path";
 import { REPO_ROOT, repoPath } from "./repo-root.js";
 import { OWNER_STRATEGY } from "./strategy/defaults.js";
 
 export { REPO_ROOT, repoPath };
 
-const USER_CONFIG_PATH = repoPath("user-config.json");
+function loadUserConfig() {
+  const override = process.env.MERIDIAN_USER_CONFIG;
+  if (override === "none") return {};
+  const file = override ? path.resolve(override) : repoPath("user-config.json");
+  if (!fs.existsSync(file)) return {};
+  return JSON.parse(fs.readFileSync(file, "utf8"));
+}
 
-const u = fs.existsSync(USER_CONFIG_PATH)
-  ? JSON.parse(fs.readFileSync(USER_CONFIG_PATH, "utf8"))
-  : {};
+const u = loadUserConfig();
 export const MIN_SAFE_BINS_BELOW = 35;
 
 function numericConfig(value) {

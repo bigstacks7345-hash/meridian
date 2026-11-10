@@ -22,7 +22,7 @@ import { recordPositionSnapshot } from "../pool-memory.js";
 import { getDeterministicCloseRule, computeBinsBelow } from "../exit-rules.js";
 import { startAdmin } from "./telegram-admin.js";
 import { planShadowEntry, stepShadowBook } from "../strategy/shadow.js";
-import { createMarketData } from "../strategy/market-data.js";
+import { createGmgnGate, createMarketData, createRequestBudget } from "../strategy/market-data.js";
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -102,13 +102,41 @@ async function attemptEntry(signal) {
   return attemptLegacyEntry(signal);
 }
 
+const ownerGmgn = { budget: null, gate: null, cache: new Map() };
+
+export function ownerSnapshotWindow(now, rules = config.ownerStrategy) {
+  const to = now - (now % 60_000);
+  const from = to - rules.pocLookbackHours * 3_600_000;
+  return { from, to };
+}
+
+export function createOwnerMarketData(overrides = {}) {
+  const rules = { ...config.ownerStrategy, ...overrides.rules };
+  if (!ownerGmgn.budget) ownerGmgn.budget = createRequestBudget(rules);
+  if (!ownerGmgn.gate) ownerGmgn.gate = createGmgnGate();
+  return createMarketData(rules, {
+    apiKey: overrides.apiKey ?? process.env.GMGN_API_KEY ?? "",
+    fetchImpl: overrides.fetchImpl ?? globalThis.fetch,
+    now: overrides.now ?? Date.now,
+    sleep: overrides.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms))),
+    budget: overrides.budget ?? ownerGmgn.budget,
+    gate: overrides.gate ?? ownerGmgn.gate,
+    cache: overrides.cache ?? ownerGmgn.cache,
+    deadline: overrides.deadline,
+  });
+}
+
 async function attemptOwnerEntry(signal) {
   const rules = config.ownerStrategy;
   const book = Array.isArray(store.data.shadowBook) ? store.data.shadowBook : [];
   const now = Date.now();
+  const window = ownerSnapshotWindow(now, rules);
   let snapshot;
   try {
-    snapshot = await createMarketData(rules).snapshot(signal.mint);
+    snapshot = await createOwnerMarketData({ deadline: signal.deadline }).snapshot(signal.mint, {
+      ...window,
+      deadline: signal.deadline,
+    });
   } catch (error) {
     return `market data error: ${error.message}`;
   }
