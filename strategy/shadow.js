@@ -12,16 +12,16 @@ export function planShadowEntry({ signal, snapshot, book = [], rules, now }) {
   } else {
     const matches = watchedConvergence(signal?.events || [], rules, now).filter(match => match.mint === signal?.mint);
     const match = matches[0];
-    if (!match) return { ok: false, terminal: true, reason: "watched-wallet convergence not met" };
+    if (!match) return { ok: false, terminal: true, filtersPassed: false, reason: "watched-wallet convergence not met" };
     wallets = match.wallets;
     pools = [...new Set(match.events.map(event => event.pool))];
   }
   const entry = evaluateEntry(snapshot, rules);
-  if (!entry.pass) return { ok: false, terminal: false, reason: entry.reasons.join("; ") || "entry filters failed" };
+  if (!entry.pass) return { ok: false, terminal: false, filtersPassed: false, reason: entry.reasons.join("; ") || "entry filters failed" };
   const range = entryRange(snapshot.livePrice, entry.display.supertrend.support, snapshot.binStep, rules);
-  if (!range.ok) return { ok: false, terminal: false, reason: range.reason };
+  if (!range.ok) return { ok: false, terminal: false, filtersPassed: true, reason: range.reason };
   const sized = positionLegs(rules);
-  if (!sized) return { ok: false, terminal: true, reason: "position size is invalid" };
+  if (!sized) return { ok: false, terminal: true, filtersPassed: true, reason: "position size is invalid" };
   const poc = lockPoc(entry.display.profile, snapshot.livePrice, rules);
   const proposal = {
     id: `shadow-${signal.mint}-${now}`,
@@ -52,8 +52,8 @@ export function planShadowEntry({ signal, snapshot, book = [], rules, now }) {
     peakPnlPct: 0,
   };
   const gate = canOpen(book, proposal, rules, now);
-  if (!gate.ok) return { ok: false, terminal: gate.terminal, reason: gate.reason };
-  return { ok: true, proposal };
+  if (!gate.ok) return { ok: false, terminal: gate.terminal, filtersPassed: true, reason: gate.reason };
+  return { ok: true, filtersPassed: true, proposal };
 }
 
 export function stepShadowPosition(position, tick, rules) {
@@ -62,7 +62,7 @@ export function stepShadowPosition(position, tick, rules) {
   if (!resolved.ok) return { position, exit: null, held: resolved.reason };
   const pnl = resolved.pnlPct;
   const peak = Math.max(position.peakPnlPct ?? 0, pnl);
-  const next = { ...position, peakPnlPct: peak };
+  const next = { ...position, peakPnlPct: peak, pnlPct: pnl };
   const exit = evaluateExit(next, tick, rules);
   if (!exit.action) return { position: next, exit: null };
   return {

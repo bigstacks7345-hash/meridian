@@ -23,6 +23,7 @@ import { recordPositionSnapshot } from "../pool-memory.js";
 import { getDeterministicCloseRule, computeBinsBelow } from "../exit-rules.js";
 import { startAdmin } from "./telegram-admin.js";
 import { planShadowEntry, stepShadowBook } from "../strategy/shadow.js";
+import { recordExit, recordScreening } from "./decisions.js";
 import { createGmgnGate, createMarketData, createRequestBudget } from "../strategy/market-data.js";
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -134,7 +135,9 @@ export function ingestFabriqAlerts(alerts, now = Date.now(), options = {}) {
     else actionable.push(alert);
   }
   recordFabriqAlerts(store, ignored, now);
-  for (const alert of ignored) log("fabriq", `startup skip ${alert.id} ${alert.mint.slice(0, 8)} (${Math.round((now - alert.at) / 1000)}s old)`);
+  const startupLimitSec = Math.round(maxAge / 1000);
+  if (ignored.length) log("fabriq", `startup skipped ${ignored.length} post(s) older than ${startupLimitSec}s (pollSec*3). staleAfterSec does not apply to this skip`);
+  for (const alert of ignored) log("fabriq", `startup skip ${alert.id} ${alert.mint.slice(0, 8)} (${Math.round((now - alert.at) / 1000)}s old, limit ${startupLimitSec}s)`);
   const added = recordFabriqAlerts(store, actionable, now);
   for (const alert of added) {
     logFabriq(alert);
@@ -345,11 +348,15 @@ async function attemptOwnerEntry(signal) {
       deadline: signal.deadline,
     });
   } catch (error) {
-    return `market data error: ${error.message}`;
+    const reason = `market data error: ${error.message}`;
+    safeScreeningLog({ now, signal, snapshot: null, book, rules, reason });
+    return reason;
   }
   if (signal.done) return null;
   if (signal.pool && snapshot?.ok) snapshot = { ...snapshot, poolAddress: signal.pool };
   const decision = planShadowEntry({ signal, snapshot, book, rules, now });
+  const logged = safeScreeningLog({ now, signal, snapshot, book, rules, result: decision, reason: decision.ok ? "shadow proposal recorded" : decision.reason });
+  if (decision.proposal && logged) decision.proposal.decisionId = logged.id;
   if (signal.done) return null;
   if (!decision.ok) {
     log("entry", `shadow skip ${signal.mint.slice(0, 8)}: ${decision.reason}`);
@@ -378,8 +385,23 @@ async function attemptOwnerEntry(signal) {
   return null;
 }
 
+function safeScreeningLog(input) {
+  try { return recordScreening(input); }
+  catch (error) { log("decision", `screening log failed: ${error.message}`); return null; }
+}
+
+function safeExitLog(input) {
+  try { return recordExit(input); }
+  catch (error) { log("decision", `exit log failed: ${error.message}`); return null; }
+}
+
 export function reviewShadowBook(book, tick) {
-  return stepShadowBook(book, tick, config.ownerStrategy);
+  const stepped = stepShadowBook(book, tick, config.ownerStrategy);
+  for (const exit of stepped.exits) {
+    const position = stepped.book.find(item => item.id === exit.id);
+    safeExitLog({ now: tick?.at ?? Date.now(), position, reason: exit.reason, pnlPct: position?.pnlPct, exitPrice: tick?.quotePrice });
+  }
+  return stepped;
 }
 
 async function attemptLegacyEntry(signal) {
@@ -544,6 +566,7 @@ export async function manageOnce() {
       const ok = res?.success !== false && !res?.error && !res?.blocked;
       const outcome = res?.dry_run ? "shadow (not submitted)" : ok ? "done" : `FAILED — ${res?.error || res?.reason || "unknown"}`;
       log("manage", `${p.pair ?? p.position.slice(0, 8)}: ${action.label} ${outcome}`);
+      if (action.tool === "close_position") safeExitLog({ position: p, reason: closeRule.reason, pnlPct: p.pnl_pct });
     }
     return null;
   } finally {
@@ -579,6 +602,7 @@ function startPnlPoller() {
           const ok = res?.success !== false && !res?.error && !res?.blocked;
           const outcome = res?.dry_run ? "shadow (not submitted)" : ok ? "closed" : `close FAILED — ${res?.error || res?.reason || "unknown"}`;
           log("poll", `${p.pair ?? p.position.slice(0, 8)}: ${outcome}`);
+          safeExitLog({ position: p, reason, pnlPct: p.pnl_pct });
         } finally {
           manageBusy = false;
         }
@@ -617,7 +641,7 @@ function startFabriqWatch() {
     onAlerts: alerts => { ingestFabriqAlerts(alerts); },
   });
   void poller.start();
-  log("fabriq", `Watching ${fabriq.url} every ${fabriq.pollSec}s (context only, not a trigger)`);
+  log("fabriq", `Watching ${fabriq.url} every ${fabriq.pollSec}s as a trigger (maxActive=${fabriq.maxActive}, staleAfterSec=${fabriq.staleAfterSec}). First poll ignores posts older than ${fabriq.pollSec * 3}s`);
   return () => poller.stop();
 }
 

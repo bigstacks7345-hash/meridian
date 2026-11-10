@@ -28,7 +28,7 @@ The app is the standalone wallet-triggered bot. There is no legacy mode or LLM d
 ## Invariants
 
 - Wallet entries require fresh convergence of the watched wallets. Do not reintroduce broad scans or expose a bypass through the CLI.
-- A Fabriq HOT alert opens its own signal with no screening deadline. It still has to pass every entry filter. Wallet pursuits take priority when `maxActiveSignals` is full, and a Fabriq pursuit ends when no newer alert arrives within `staleAfterSec`.
+- A Fabriq HOT alert opens its own signal with no screening deadline. It still has to pass every entry filter. Wallet pursuits take priority when `maxActiveSignals` is full. A Fabriq pursuit ends when no newer alert arrives within `staleAfterSec` (default 1800). The first poll after startup is separate: it ignores posts older than `pollSec * 3` (60 seconds at the default), not `staleAfterSec`.
 - This build forces shadow mode and `DRY_RUN=true`. `transactionsAreDryRun()` stays true. Do not load `walletKey` into `WALLET_PRIVATE_KEY`.
 - Missing data must not be interpreted as empty positions or spendable funds.
 - Keep entry screening independent of exit polling. Serialize wallet mutations through the existing queue.
@@ -41,6 +41,8 @@ The app is the standalone wallet-triggered bot. There is no legacy mode or LLM d
 ## Configuration and state
 
 `config.js` loads `user-config.json` once. The example file documents supported settings. Restart after changes. Secrets belong in environment variables or `.env`; never commit them. Keep existing ignored JSON state and logs intact.
+
+Each screening attempt appends one JSON object to `state/decisions-YYYY-MM-DD.jsonl` (`proposal` when a shadow position is recorded, `pass` when the entry filters passed but the position was not opened, `skip` otherwise). Exits append a second object linked by `decisionId`. Files rotate by UTC day and records older than 90 days are removed. The directory is gitignored and must not contain secrets.
 
 ## Checks
 

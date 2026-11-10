@@ -2,6 +2,7 @@
 import { OWNER_STRATEGY } from "../strategy/defaults.js";
 import { passingSnapshot } from "../strategy/fixtures.js";
 import { planShadowEntry, stepShadowPosition } from "../strategy/shadow.js";
+import { recordExit, recordScreening } from "../standalone/decisions.js";
 import { watchedConvergence } from "../strategy/rules.js";
 
 const mint = "MintReplay11111111111111111111111111111111";
@@ -16,6 +17,10 @@ const signal = {
 };
 const snapshot = passingSnapshot(mint);
 const decision = planShadowEntry({ signal, snapshot, book: [], rules: OWNER_STRATEGY, now });
+try {
+  const logged = recordScreening({ now, signal, snapshot, book: [], rules: OWNER_STRATEGY, result: decision, reason: decision.ok ? "shadow proposal recorded" : decision.reason });
+  if (decision.proposal) decision.proposal.decisionId = logged.id;
+} catch { /* the replay report does not depend on the decision log */ }
 if (!decision.ok) {
   console.log(JSON.stringify({ ok: false, reason: decision.reason }, null, 2));
   process.exitCode = 1;
@@ -33,7 +38,10 @@ if (!decision.ok) {
     const stepped = stepShadowPosition(position, tick, OWNER_STRATEGY);
     position = stepped.position;
     trace.push({ label: tick.label, pnlPct: tick.pnlPct, exit: stepped.exit?.rule || null, status: position.status });
-    if (position.status === "closed") break;
+    if (position.status === "closed") {
+      try { recordExit({ now: tick.at, position, reason: position.closeReason, pnlPct: position.pnlPct }); } catch { /* replay continues */ }
+      break;
+    }
   }
   const report = {
     mode: "shadow",

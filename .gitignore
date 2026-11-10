@@ -48,6 +48,9 @@ discord-signals.json
 # Claude Code runtime lock
 .claude/scheduled_tasks.lock
 
+# Screening and exit snapshots for offline review. No secrets.
+state/
+
 # Standalone monitor state and process lock
 wallet-monitor-state.json
 wallet-monitor-state.json.tmp

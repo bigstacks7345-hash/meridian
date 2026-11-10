@@ -6,6 +6,7 @@
     "The volume profile is a TradingView visible-range VPVR equivalent built from 1440 one-minute bars.",
     "candleProvider none fails closed. gmgn and the stubbed birdeye adapter are selectable.",
     "Fabriq HOT is a separate trigger. It uses the same entry filters and does not replace the two-wallet rule.",
+    "The first Fabriq poll ignores posts older than pollSec*3. staleAfterSec ends an open pursuit that gets no newer alert.",
     "Do not put a private key in this file."
   ],
   "shadowMode": true,
