@@ -80,21 +80,25 @@ function sidePlan(reshape, direction) {
   return { reshapedSide: "token", keptSide: "sol" };
 }
 
-function reshapeBins(bins, active, plan, shape) {
+function reshapeBins(bins, active, plan, shape, windowBins) {
   if (plan.reshapedSide === "both") {
     const lower = bins[0].bin;
     const upper = bins[bins.length - 1].bin;
     return { bins: fullDistribution(shape, lower, upper, active), reshapedShare: 1 };
   }
-  const kept = bins.filter(row => plan.reshapedSide === "token" ? row.bin < active : row.bin >= active);
-  const moving = bins.filter(row => plan.reshapedSide === "token" ? row.bin >= active : row.bin < active);
+  const tokenSide = plan.reshapedSide === "token";
+  const moving = tokenSide
+    ? bins.filter(row => row.bin >= active)
+    : bins.filter(row => row.bin < active && (windowBins == null || row.bin >= active - windowBins));
+  const kept = tokenSide
+    ? bins.filter(row => row.bin < active)
+    : bins.filter(row => row.bin >= active || (windowBins != null && row.bin < active - windowBins));
   const mass = sumShares(moving);
   if (!moving.length || mass <= 0) return { bins, reshapedShare: 0 };
-  const center = plan.reshapedSide === "sol" ? moving[moving.length - 1].bin : moving[0].bin;
+  const center = tokenSide ? moving[0].bin : moving[moving.length - 1].bin;
   const fresh = fullDistribution(shape, moving[0].bin, moving[moving.length - 1].bin, center)
     .map(row => ({ bin: row.bin, share: row.share * mass }));
-  const next = (plan.reshapedSide === "token" ? [...kept, ...fresh] : [...fresh, ...kept])
-    .sort((a, b) => a.bin - b.bin);
+  const next = [...kept, ...fresh].sort((a, b) => a.bin - b.bin);
   return { bins: next, reshapedShare: mass };
 }
 
@@ -134,16 +138,21 @@ export function simulateLiquidity(position, observation = {}, rules = {}, now = 
   if (reshape.enabled !== false && active != null && state.anchorBin != null && lower != null && upper != null) {
     const buffered = inFlipBuffer(active, lower, upper, buffer);
     const entered = buffered && !state.inBuffer;
-    const moved = Math.abs(active - state.anchorBin) > allowed;
+    const pumpAllowed = clampInt(reshape.pumpAllowedBinMovement, 1, 200, 20);
+    const pumpWindow = clampInt(reshape.pumpReshapeBins, 1, 200, 20);
+    const delta = active - state.anchorBin;
+    const direction = delta < 0 || (buffered && active <= lower + buffer) ? "down" : "up";
+    const moved = reshape.mode === "both_sides"
+      ? Math.abs(delta) > allowed
+      : (direction === "down" ? -delta > allowed : delta > pumpAllowed);
     const waited = state.lastReshapeAt == null || now - state.lastReshapeAt >= intervalMs;
-    const direction = active < state.anchorBin || (buffered && active <= lower + buffer) ? "down" : "up";
     const desired = reshape.mode === "both_sides"
       ? (buffered ? (reshape.alternateShape || "spot_bidask_5050") : (reshape.startShape || "curve"))
       : (reshape.oneSideShape || "spot_bidask_5050");
     if ((entered || moved) && waited && state.bins?.length) {
       const plan = sidePlan(reshape, direction);
       const beforeBins = state.bins.map(row => ({ ...row }));
-      const rebuilt = reshapeBins(beforeBins, active, plan, desired);
+      const rebuilt = reshapeBins(beforeBins, active, plan, desired, direction === "up" ? pumpWindow : null);
       const before = nearShareOf(beforeBins, active, allowed);
       const after = nearShareOf(rebuilt.bins, active, allowed);
       const baselineBins = fullDistribution(reshape.startShape || "curve", lower, upper, state.entryBin ?? state.anchorBin);
@@ -156,6 +165,9 @@ export function simulateLiquidity(position, observation = {}, rules = {}, now = 
         mode: reshape.mode || "one_side",
         reshapedSide: plan.reshapedSide,
         keptSide: plan.keptSide,
+        allowedBinMovement: allowed,
+        pumpAllowedBinMovement: pumpAllowed,
+        pumpReshapeBins: pumpWindow,
         activeBin: active,
         feesUsd: fees,
         estimatedCostSol: cost.sol * factor,

@@ -125,6 +125,8 @@ export const OWNER_STRATEGY = {
     onDump: "reshape_token_side_keep_sol",
     onPump: "reshape_sol_side_keep_token",
     oneSideShape: "spot_bidask_5050",
+    pumpAllowedBinMovement: 20,
+    pumpReshapeBins: 20,
   },
   birdeyeEnabled: false,
   birdeyeBaseUrl: "https://public-api.birdeye.so",

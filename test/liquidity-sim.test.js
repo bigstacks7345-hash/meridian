@@ -52,14 +52,14 @@ test("compound waits for fees above cost, then fires without executing", () => {
 
 test("reshape follows a bin move, flips near the edge, and waits for the interval", () => {
   const seeded = simulateLiquidity(position(), observe(120, 0), rules, 0);
-  const early = simulateLiquidity(seeded.position, observe(126, 10_000), rules, 10_000);
+  const early = simulateLiquidity(seeded.position, observe(114, 10_000), rules, 10_000);
   assert.equal(early.events.length, 0);
-  const moved = simulateLiquidity(seeded.position, observe(126, 61_000), rules, 61_000);
+  const moved = simulateLiquidity(seeded.position, observe(114, 61_000), rules, 61_000);
   assert.equal(moved.events.length, 1);
   assert.equal(moved.events[0].kind, "reshape");
   assert.equal(moved.events[0].reason, "bin movement");
   assert.equal(moved.events[0].shapeBefore, "curve");
-  assert.equal(moved.events[0].activeBin, 126);
+  assert.equal(moved.events[0].activeBin, 114);
   assert.equal(moved.executed, false);
   const flipped = simulateLiquidity(seeded.position, observe(139, 61_000), rules, 61_000);
   assert.equal(flipped.events[0].reason, "flip buffer");
@@ -86,14 +86,26 @@ test("a dump reshapes only the token side and a pump reshapes only the SOL side"
   for (const row of dumped.position.liquidity.bins.filter(item => item.bin < 110)) {
     assert.equal(row.share, before.find(item => item.bin === row.bin).share);
   }
-  const pumped = simulateLiquidity(seeded.position, observe(130, 61_000), rules, 61_000);
+  const wide = { ...position(), lowerBin: 80, upperBin: 220 };
+  const wideSeed = simulateLiquidity(wide, { ...observe(120, 0), lowerBin: 80, upperBin: 220 }, rules, 0);
+  for (const binsUp of [6, 19, 20]) {
+    const held = simulateLiquidity(wideSeed.position, { ...observe(120 + binsUp, 61_000), lowerBin: 80, upperBin: 220 }, rules, 61_000);
+    assert.equal(held.events.length, 0, `${binsUp} bins up`);
+  }
+  const pumped = simulateLiquidity(wideSeed.position, { ...observe(141, 61_000), lowerBin: 80, upperBin: 220 }, rules, 61_000);
   const pump = pumped.events[0];
   assert.equal(pump.direction, "up");
   assert.equal(pump.reshapedSide, "sol");
   assert.equal(pump.keptSide, "token");
-  for (const row of pumped.position.liquidity.bins.filter(item => item.bin >= 130)) {
-    assert.equal(row.share, before.find(item => item.bin === row.bin).share);
+  assert.equal(pump.pumpAllowedBinMovement, 20);
+  assert.equal(pump.pumpReshapeBins, 20);
+  assert.equal(pump.allowedBinMovement, 5);
+  const pumpBefore = wideSeed.position.liquidity.bins;
+  for (const row of pumped.position.liquidity.bins.filter(item => item.bin >= 141 || item.bin < 121)) {
+    assert.equal(row.share, pumpBefore.find(item => item.bin === row.bin).share);
   }
+  const movedBins = pumped.position.liquidity.bins.filter(item => item.bin >= 121 && item.bin < 141);
+  assert.equal(movedBins.length, 20);
   const lowerEdge = simulateLiquidity(seeded.position, observe(101, 61_000), rules, 61_000);
   assert.equal(lowerEdge.events[0].reason, "flip buffer");
   assert.equal(lowerEdge.events[0].reshapedSide, "token");
