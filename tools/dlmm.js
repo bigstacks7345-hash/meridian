@@ -837,6 +837,12 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
                   : parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenX?.usd || 0) + parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenY?.usd || 0)
               ) * 10000) / 10000
             : null,
+          unclaimed_fee_token_usd: binData
+            ? Math.round(parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenX?.usd || 0) * 10000) / 10000
+            : null,
+          unclaimed_fee_sol_usd: binData
+            ? Math.round(parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenY?.usd || 0) * 10000) / 10000
+            : null,
           total_value_usd:    binData
             ? Math.round((
                 config.management.solMode

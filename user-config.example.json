@@ -8,6 +8,7 @@
     "Fabriq HOT is a separate trigger. It uses the same entry filters and does not replace the two-wallet rule.",
     "crashGuard rejects a SOL price more than maxDrawdownPct below the lookback high. poolDepth rejects a pool whose own 5m volume divided by its liquidity exceeds maxVolToLiq5m.",
     "autoCompound and reshapeLiquidity are shadow simulations. execute is forced off and no transaction is built.",
+    "autoCompound.bands place token fees and SOL fees by the percent the quote price sits below the upper edge. requireFeesExceedCostX 0 leaves the cost multiple off. A curve compound can profit-take after curveProfitTake.binsUp.",
     "reshapeLiquidity.mode one_side reshapes only the token side on a dump and only the SOL side on a pump. both_sides redistributes the whole range.",
     "The first Fabriq poll ignores posts older than pollSec*3. staleAfterSec ends an open pursuit that gets no newer alert.",
     "Do not put a private key in this file."
@@ -201,8 +202,15 @@
       "simulateOnly": true,
       "execute": false,
       "minFeesUsd": 5,
-      "shape": "spot",
-      "requireFeesExceedCostX": 3,
+      "requireFeesExceedCostX": 0,
+      "bandBasis": "pct_below_top",
+      "bands": [
+        { "maxDistPct": 10, "tokenShape": "curve", "solShape": "bidask" },
+        { "maxDistPct": 25, "tokenShape": "spot", "solShape": "spot" },
+        { "maxDistPct": 40, "tokenShape": "bidask", "solShape": "curve" }
+      ],
+      "fallbackBand": { "tokenShape": "bidask", "solShape": "curve" },
+      "curveProfitTake": { "enabled": true, "binsUp": 4, "solShape": "bidask" },
       "baseFeeSol": 0.000005,
       "priorityFeeSol": 0.00002,
       "rentSol": 0

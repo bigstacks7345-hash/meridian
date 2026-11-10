@@ -419,6 +419,11 @@ function noteShadowLiquidity(livePositions) {
       lowerBin: live.lower_bin,
       upperBin: live.upper_bin,
       unclaimedFeesUsd: live.unclaimed_fees_usd,
+      tokenFeesUsd: live.unclaimed_fee_token_usd ?? null,
+      solFeesUsd: live.unclaimed_fee_sol_usd ?? null,
+      price: live.quote_price ?? null,
+      upperPrice: live.upper_price ?? null,
+      binStep: live.bin_step ?? null,
       solPriceUsd: live.sol_price_usd ?? null,
     }, config.ownerStrategy, now);
     if (simulated.events.length) changed = true;

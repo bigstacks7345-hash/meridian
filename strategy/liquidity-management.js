@@ -23,8 +23,12 @@ function blankState(rules) {
     inBuffer: false,
     bins: null,
     compoundedFeesUsd: 0,
+    compoundedTokenFeesUsd: 0,
+    compoundedSolFeesUsd: 0,
+    pendingCurveCompound: null,
     compounds: 0,
     reshapes: 0,
+    profitTakes: 0,
     estimatedCostSol: 0,
     estimatedCostUsd: 0,
     estimatedExtraFeesUsd: 0,
@@ -102,6 +106,66 @@ function reshapeBins(bins, active, plan, shape, windowBins) {
   return { bins: next, reshapedShare: mass };
 }
 
+const DEFAULT_BANDS = [
+  { maxDistPct: 10, tokenShape: "curve", solShape: "bidask" },
+  { maxDistPct: 25, tokenShape: "spot", solShape: "spot" },
+  { maxDistPct: 40, tokenShape: "bidask", solShape: "curve" },
+];
+
+function bandList(compound) {
+  const rows = Array.isArray(compound?.bands) && compound.bands.length ? compound.bands : DEFAULT_BANDS;
+  return rows
+    .map(row => ({
+      maxDistPct: finite(row?.maxDistPct),
+      tokenShape: row?.tokenShape || "spot",
+      solShape: row?.solShape || "spot",
+    }))
+    .filter(row => row.maxDistPct != null)
+    .sort((a, b) => a.maxDistPct - b.maxDistPct);
+}
+
+function selectBand(dist, compound) {
+  const bands = bandList(compound);
+  const configured = compound?.fallbackBand && typeof compound.fallbackBand === "object" ? compound.fallbackBand : null;
+  const last = bands[bands.length - 1];
+  const fallback = {
+    maxDistPct: finite(configured?.maxDistPct),
+    tokenShape: configured?.tokenShape || last?.tokenShape || "bidask",
+    solShape: configured?.solShape || last?.solShape || "curve",
+  };
+  const match = dist != null ? bands.find(row => dist <= row.maxDistPct) : null;
+  return match ? { band: match, bandFallback: false, bands } : { band: fallback, bandFallback: true, bands };
+}
+
+function binQuote(bin, binStep) {
+  const step = finite(binStep);
+  if (bin == null || !(step > 0)) return null;
+  return (1 + step / 10_000) ** bin;
+}
+
+function distanceBelowTop(observation, active, upperBin) {
+  let upper = finite(observation?.upperPrice ?? observation?.upperQuotePrice);
+  let price = finite(observation?.price ?? observation?.quotePrice);
+  if (!(upper > 0) || price == null) {
+    upper = binQuote(upperBin, observation?.binStep);
+    price = binQuote(active, observation?.binStep);
+  }
+  if (!(upper > 0) || price == null) return null;
+  return ((upper - price) / upper) * 100;
+}
+
+function freshSideFees(observation, state) {
+  const token = finite(observation?.tokenFeesUsd);
+  const sol = finite(observation?.solFeesUsd);
+  const reported = finite(observation?.unclaimedFeesUsd);
+  const tokenFresh = token == null ? null : Math.max(0, token - (state.compoundedTokenFeesUsd || 0));
+  const solFresh = sol == null ? null : Math.max(0, sol - (state.compoundedSolFeesUsd || 0));
+  const fresh = tokenFresh != null || solFresh != null
+    ? (tokenFresh ?? 0) + (solFresh ?? 0)
+    : (reported == null ? null : Math.max(0, reported - (state.compoundedFeesUsd || 0)));
+  return { tokenFresh, solFresh, fresh };
+}
+
 function inFlipBuffer(active, lower, upper, buffer) {
   if (active == null || lower == null || upper == null) return false;
   return active <= lower + buffer || active >= upper - buffer;
@@ -134,8 +198,48 @@ export function simulateLiquidity(position, observation = {}, rules = {}, now = 
   const intervalMs = Math.max(0, Number(reshape.minIntervalSec ?? 60)) * 1000;
   const cost = txCost(observation, rules);
   const fees = finite(observation.unclaimedFeesUsd);
+  const waited = state.lastReshapeAt == null || now - state.lastReshapeAt >= intervalMs;
+  let reshapedThisTick = false;
 
-  if (reshape.enabled !== false && active != null && state.anchorBin != null && lower != null && upper != null) {
+  const profit = compound.curveProfitTake || {};
+  const profitBins = clampInt(profit.binsUp, 1, 200, 4);
+  const pending = state.pendingCurveCompound;
+  const risen = pending && active != null ? active - pending.activeBin : null;
+  if (profit.enabled !== false && pending && risen >= profitBins && waited && state.bins?.length && active != null) {
+    const profitShape = profit.solShape || pending.solShape || "bidask";
+    const beforeBins = state.bins.map(row => ({ ...row }));
+    const rebuilt = reshapeBins(beforeBins, active, { reshapedSide: "sol", keptSide: "token" }, profitShape, risen);
+    const factor = rebuilt.reshapedShare;
+    events.push(event("profit-take", position, observation, now, {
+      reason: "curve profit-take",
+      profitTake: true,
+      binsMoved: risen,
+      direction: "up",
+      reshapedSide: "sol",
+      keptSide: "token",
+      solShape: profitShape,
+      tokenShape: pending.tokenShape,
+      band: pending.band,
+      bandFallback: false,
+      distFromTopPct: pending.distFromTopPct,
+      activeBin: active,
+      compoundActiveBin: pending.activeBin,
+      estimatedCostSol: cost.sol * factor,
+      estimatedCostUsd: cost.usd == null ? null : cost.usd * factor,
+    }));
+    state.bins = rebuilt.bins;
+    state.shape = profitShape;
+    state.anchorBin = active;
+    state.lastReshapeAt = now;
+    state.pendingCurveCompound = null;
+    state.reshapes += 1;
+    state.profitTakes += 1;
+    state.estimatedCostSol += cost.sol * factor;
+    if (cost.usd != null) state.estimatedCostUsd += cost.usd * factor;
+    reshapedThisTick = true;
+  }
+
+  if (!reshapedThisTick && reshape.enabled !== false && active != null && state.anchorBin != null && lower != null && upper != null) {
     const buffered = inFlipBuffer(active, lower, upper, buffer);
     const entered = buffered && !state.inBuffer;
     const pumpAllowed = clampInt(reshape.pumpAllowedBinMovement, 1, 200, 20);
@@ -145,7 +249,6 @@ export function simulateLiquidity(position, observation = {}, rules = {}, now = 
     const moved = reshape.mode === "both_sides"
       ? Math.abs(delta) > allowed
       : (direction === "down" ? -delta > allowed : delta > pumpAllowed);
-    const waited = state.lastReshapeAt == null || now - state.lastReshapeAt >= intervalMs;
     const desired = reshape.mode === "both_sides"
       ? (buffered ? (reshape.alternateShape || "spot_bidask_5050") : (reshape.startShape || "curve"))
       : (reshape.oneSideShape || "spot_bidask_5050");
@@ -159,8 +262,11 @@ export function simulateLiquidity(position, observation = {}, rules = {}, now = 
       const baseline = nearShareOf(baselineBins, active, allowed);
       const uplift = before != null && after != null && fees != null ? Math.max(0, after - (baseline ?? before)) * fees : null;
       const factor = plan.reshapedSide === "both" ? 1 : rebuilt.reshapedShare;
+      const binsMoved = direction === "up" ? Math.min(pumpWindow, Math.max(0, delta)) : Math.max(0, -delta);
       events.push(event("reshape", position, observation, now, {
         reason: entered ? "flip buffer" : "bin movement",
+        profitTake: false,
+        binsMoved,
         direction,
         mode: reshape.mode || "one_side",
         reshapedSide: plan.reshapedSide,
@@ -182,6 +288,7 @@ export function simulateLiquidity(position, observation = {}, rules = {}, now = 
       state.bins = rebuilt.bins;
       state.anchorBin = active;
       state.lastReshapeAt = now;
+      state.pendingCurveCompound = null;
       state.reshapes += 1;
       state.estimatedCostSol += cost.sol * factor;
       if (cost.usd != null) state.estimatedCostUsd += cost.usd * factor;
@@ -190,33 +297,54 @@ export function simulateLiquidity(position, observation = {}, rules = {}, now = 
     state.inBuffer = buffered;
   }
 
-  const freshFees = fees == null ? null : Math.max(0, fees - (state.compoundedFeesUsd || 0));
-  const multiple = Number(compound.requireFeesExceedCostX ?? 3);
+  const { tokenFresh, solFresh, fresh } = freshSideFees(observation, state);
+  const multiple = Number(compound.requireFeesExceedCostX ?? 0);
   const minFees = Number(compound.minFeesUsd ?? 5);
-  const costlyEnough = cost.usd != null && freshFees != null && freshFees >= multiple * cost.usd;
-  if (compound.enabled !== false && freshFees != null && freshFees >= minFees && costlyEnough) {
-    const shapeAfter = compound.shape || "spot";
-    const before = nearShareOf(state.bins, active, allowed);
-    const afterBins = state.lowerBin != null && state.upperBin != null
-      ? fullDistribution(shapeAfter, state.lowerBin, state.upperBin, active ?? state.anchorBin)
-      : state.bins;
-    const after = nearShareOf(afterBins, active, allowed);
+  const costGate = Number.isFinite(multiple) && multiple > 0;
+  const costlyEnough = !costGate || (cost.usd != null && fresh != null && fresh >= multiple * cost.usd);
+  const dist = distanceBelowTop(observation, active, upper);
+  const basis = compound.bandBasis || "pct_below_top";
+  if (compound.enabled !== false && basis === "pct_below_top" && fresh != null && fresh >= minFees && costlyEnough && dist != null && active != null) {
+    const selected = selectBand(dist, compound);
+    const { band, bandFallback } = selected;
+    let bins = state.bins ? state.bins.map(row => ({ ...row })) : [];
+    if (tokenFresh > 0) bins = reshapeBins(bins, active, { reshapedSide: "token", keptSide: "sol" }, band.tokenShape, null).bins;
+    if (solFresh > 0) bins = reshapeBins(bins, active, { reshapedSide: "sol", keptSide: "token" }, band.solShape, null).bins;
+    const top = selected.bands[0];
+    const curveBand = !bandFallback && tokenFresh > 0 && band.tokenShape === "curve" && top && band.maxDistPct === top.maxDistPct;
     events.push(event("compound", position, observation, now, {
+      bandBasis: basis,
+      distFromTopPct: dist,
+      band: { maxDistPct: band.maxDistPct, tokenShape: band.tokenShape, solShape: band.solShape },
+      bandFallback,
+      tokenShape: band.tokenShape,
+      solShape: band.solShape,
+      tokenFeesUsd: tokenFresh,
+      solFeesUsd: solFresh,
+      feesUsd: fresh,
+      profitTake: false,
+      binsMoved: null,
       activeBin: active,
-      feesUsd: freshFees,
       estimatedCostSol: cost.sol,
       estimatedCostUsd: cost.usd,
-      shapeBefore: state.shape,
-      shapeAfter,
-      nearShareBefore: before,
-      nearShareAfter: after,
-      estimatedFeeUpliftUsd: before != null && after != null ? Math.max(0, after - before) * freshFees : null,
+      requireFeesExceedCostX: costGate ? multiple : 0,
     }));
-    state.shape = shapeAfter;
-    state.compoundedFeesUsd += freshFees;
+    state.bins = bins;
+    state.shape = band.tokenShape;
+    if (tokenFresh != null) state.compoundedTokenFeesUsd += tokenFresh;
+    if (solFresh != null) state.compoundedSolFeesUsd += solFresh;
+    state.compoundedFeesUsd += fresh;
     state.compounds += 1;
     state.estimatedCostSol += cost.sol;
     if (cost.usd != null) state.estimatedCostUsd += cost.usd;
+    state.pendingCurveCompound = curveBand && profit.enabled !== false ? {
+      activeBin: active,
+      at: now,
+      distFromTopPct: dist,
+      tokenShape: band.tokenShape,
+      solShape: band.solShape,
+      band: { maxDistPct: band.maxDistPct, tokenShape: band.tokenShape, solShape: band.solShape },
+    } : null;
   }
 
   return { position: next, events, executed: false };
@@ -245,6 +373,7 @@ export function liquidityCloseSummary(position, now = Date.now()) {
     at: new Date(now).toISOString(),
     compounds: state.compounds || 0,
     reshapes: state.reshapes || 0,
+    profitTakes: state.profitTakes || 0,
     estimatedCostSol: state.estimatedCostSol || 0,
     estimatedCostUsd: state.estimatedCostUsd || 0,
     estimatedExtraFeesUsd: state.estimatedExtraFeesUsd || 0,

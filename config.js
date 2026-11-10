@@ -70,6 +70,19 @@ function mergeOwnerStrategy(overrides) {
     merged[key] = { ...OWNER_STRATEGY[key], ...(override && typeof override === "object" ? override : {}) };
     merged[key].execute = false;
   }
+  const compoundOverride = source.autoCompound && typeof source.autoCompound === "object" ? source.autoCompound : {};
+  merged.autoCompound.curveProfitTake = {
+    ...OWNER_STRATEGY.autoCompound.curveProfitTake,
+    ...(compoundOverride.curveProfitTake && typeof compoundOverride.curveProfitTake === "object" ? compoundOverride.curveProfitTake : {}),
+  };
+  merged.autoCompound.fallbackBand = {
+    ...OWNER_STRATEGY.autoCompound.fallbackBand,
+    ...(compoundOverride.fallbackBand && typeof compoundOverride.fallbackBand === "object" ? compoundOverride.fallbackBand : {}),
+  };
+  if (!Array.isArray(compoundOverride.bands) || compoundOverride.bands.length === 0) {
+    merged.autoCompound.bands = OWNER_STRATEGY.autoCompound.bands;
+  }
+  merged.autoCompound.execute = false;
   return merged;
 }
 const ownerStrategy = mergeOwnerStrategy(u.ownerStrategy);
