@@ -1,8 +1,8 @@
 import fs from 'node:fs';
-import { repoPath } from '../repo-root.js';
+import { monitorStateFile } from './paths.js';
 
 export class MonitorStore {
-  constructor(file = repoPath('wallet-monitor-state.json')) {
+  constructor(file = monitorStateFile()) {
     this.file = file;
     this.data = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : {
       version: 1, wallets: {}, pending: {}, seen: {}, events: [], signals: {}, attempts: {}, paused: false,

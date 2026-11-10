@@ -1,9 +1,18 @@
 // Offline shadow replay. It does not read a private key, sign, or broadcast.
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { OWNER_STRATEGY } from "../strategy/defaults.js";
+import { repoPath } from "../repo-root.js";
+import { decisionDirectory, recordExit, recordScreening, setDecisionDirectory } from "../standalone/decisions.js";
 import { passingSnapshot } from "../strategy/fixtures.js";
 import { planShadowEntry, stepShadowPosition } from "../strategy/shadow.js";
-import { recordExit, recordScreening } from "../standalone/decisions.js";
 import { watchedConvergence } from "../strategy/rules.js";
+
+const repoState = path.resolve(repoPath("state"));
+if (path.resolve(decisionDirectory()) === repoState) {
+  setDecisionDirectory(fs.mkdtempSync(path.join(os.tmpdir(), "meridian-shadow-replay-")));
+}
 
 const mint = "MintReplay11111111111111111111111111111111";
 const now = Date.parse("2026-11-09T00:00:00Z");

@@ -4,20 +4,26 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { repoPath } from "../repo-root.js";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { decisionsDir } from "./paths.js";
 import { entryRange, evaluateEntry, lockPoc, selectProfileWindow } from "../strategy/rules.js";
 
 export const DECISION_RETENTION_DAYS = 90;
 const SECRET_KEY = /private|secret|apikey|api_key|authorization|password|walletkey|mnemonic|seed/i;
 
+const directoryStore = new AsyncLocalStorage();
 let directoryOverride = null;
 
 export function setDecisionDirectory(dir) {
   directoryOverride = dir || null;
 }
 
+export function withDecisionDirectory(dir, fn) {
+  return directoryStore.run(dir, fn);
+}
+
 export function decisionDirectory() {
-  return directoryOverride || repoPath("state");
+  return directoryStore.getStore() || directoryOverride || decisionsDir();
 }
 
 export function decisionFile(now = Date.now(), dir = decisionDirectory()) {

@@ -12,7 +12,7 @@ import {
   pruneDecisionLogs,
   recordExit,
   recordScreening,
-  setDecisionDirectory,
+  withDecisionDirectory,
 } from "../standalone/decisions.js";
 import { reviewShadowBook } from "../standalone/runtime.js";
 
@@ -40,8 +40,7 @@ function signal(now) {
 
 test("screening decisions and linked exits append to a daily JSONL file", () => {
   const dir = tempDir();
-  setDecisionDirectory(dir);
-  try {
+  try { withDecisionDirectory(dir, () => {
     const now = Date.parse("2026-11-10T06:00:00.000Z");
     const snapshot = passingSnapshot(mint);
     const proposed = planShadowEntry({ signal: signal(now), snapshot, book: [], rules: OWNER_STRATEGY, now });
@@ -123,8 +122,8 @@ test("screening decisions and linked exits append to a daily JSONL file", () => 
     const text = fs.readFileSync(decisionFile(now, dir), "utf8");
     assert.equal(text.includes(secret), false);
     assert.equal(text.includes("apiKey"), false);
+  });
   } finally {
-    setDecisionDirectory(null);
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });

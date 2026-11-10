@@ -46,4 +46,4 @@ Each screening attempt appends one JSON object to `state/decisions-YYYY-MM-DD.js
 
 ## Checks
 
-Run `npm test` after changes. `test/test-standalone.js` covers convergence, event parsing, screening, balances, priority ordering, and exits. `test/cleanup.test.js` checks module resolution, no-network imports, CLI surface, and mocked Meteora position mapping. Do not start the live daemon or send transactions to validate a refactor.
+Run `npm test` after changes. It sets `NODE_ENV=test` and points `STATE_DIR` and `DECISIONS_DIR` at a temporary directory, then fails if `state/` or `wallet-monitor-state.json` in the repo changed. `scripts/shadow-replay.js` also refuses the repo `state/` directory. `test/test-standalone.js` covers convergence, event parsing, screening, balances, priority ordering, and exits. `test/cleanup.test.js` checks module resolution, no-network imports, CLI surface, and mocked Meteora position mapping. Do not start the live daemon or send transactions to validate a refactor.
