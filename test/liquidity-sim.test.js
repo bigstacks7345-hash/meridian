@@ -96,35 +96,44 @@ test("reshape follows a bin move, flips near the edge, and waits for the interva
 test("a dump reshapes only the token side and a pump reshapes only the SOL side", () => {
   const seeded = simulateLiquidity(position(), observe(120, 0), rules, 0);
   const before = seeded.position.liquidity.bins.map(row => ({ ...row }));
-  const dumped = simulateLiquidity(seeded.position, observe(110, 61_000), rules, 61_000);
+  const dumped = simulateLiquidity(seeded.position, observe(114, 61_000), rules, 61_000);
   const dump = dumped.events[0];
   assert.equal(dump.direction, "down");
   assert.equal(dump.reshapedSide, "token");
   assert.equal(dump.keptSide, "sol");
   assert.equal(dump.mode, "one_side");
   assert.equal(dump.shapeAfter, "spot_bidask_5050");
-  for (const row of dumped.position.liquidity.bins.filter(item => item.bin < 110)) {
+  assert.ok(dump.rangeFraction < 0.5);
+  for (const row of dumped.position.liquidity.bins.filter(item => item.bin < 114)) {
     assert.equal(row.share, before.find(item => item.bin === row.bin).share);
   }
   const wide = { ...position(), lowerBin: 80, upperBin: 220 };
   const wideSeed = simulateLiquidity(wide, { ...observe(120, 0), lowerBin: 80, upperBin: 220 }, rules, 0);
-  for (const binsUp of [6, 19, 20]) {
-    const held = simulateLiquidity(wideSeed.position, { ...observe(120 + binsUp, 61_000), lowerBin: 80, upperBin: 220 }, rules, 61_000);
-    assert.equal(held.events.length, 0, `${binsUp} bins up`);
-  }
-  const pumped = simulateLiquidity(wideSeed.position, { ...observe(141, 61_000), lowerBin: 80, upperBin: 220 }, rules, 61_000);
-  const pump = pumped.events[0];
+  const tooSoon = simulateLiquidity(wideSeed.position, { ...observe(123, 61_000), lowerBin: 80, upperBin: 220 }, rules, 61_000);
+  assert.equal(tooSoon.events.length, 0);
+  const firstPump = simulateLiquidity(wideSeed.position, { ...observe(124, 61_000), lowerBin: 80, upperBin: 220 }, rules, 61_000);
+  assert.equal(firstPump.events[0].direction, "up");
+  assert.equal(firstPump.events[0].reshapedSide, "sol");
+  assert.equal(firstPump.events[0].firstPump, true);
+  assert.equal(firstPump.events[0].pumpTriggerBins, 4);
+  assert.equal(firstPump.events[0].binsMoved, 4);
+  const laterShort = simulateLiquidity(firstPump.position, { ...observe(144, 130_000), lowerBin: 80, upperBin: 220 }, rules, 130_000);
+  assert.equal(laterShort.events.length, 0);
+  const later = simulateLiquidity(firstPump.position, { ...observe(145, 130_000), lowerBin: 80, upperBin: 220 }, rules, 130_000);
+  const pump = later.events[0];
   assert.equal(pump.direction, "up");
   assert.equal(pump.reshapedSide, "sol");
   assert.equal(pump.keptSide, "token");
+  assert.equal(pump.firstPump, false);
   assert.equal(pump.pumpAllowedBinMovement, 20);
+  assert.equal(pump.pumpTriggerBins, 20);
   assert.equal(pump.pumpReshapeBins, 20);
-  assert.equal(pump.allowedBinMovement, 5);
-  const pumpBefore = wideSeed.position.liquidity.bins;
-  for (const row of pumped.position.liquidity.bins.filter(item => item.bin >= 141 || item.bin < 121)) {
+  assert.equal(pump.binsMoved, 20);
+  const pumpBefore = firstPump.position.liquidity.bins;
+  for (const row of later.position.liquidity.bins.filter(item => item.bin >= 145 || item.bin < 125)) {
     assert.equal(row.share, pumpBefore.find(item => item.bin === row.bin).share);
   }
-  const movedBins = pumped.position.liquidity.bins.filter(item => item.bin >= 121 && item.bin < 141);
+  const movedBins = later.position.liquidity.bins.filter(item => item.bin >= 125 && item.bin < 145);
   assert.equal(movedBins.length, 20);
   const lowerEdge = simulateLiquidity(seeded.position, observe(101, 61_000), rules, 61_000);
   assert.equal(lowerEdge.events[0].reason, "flip buffer");
@@ -207,6 +216,7 @@ test("a curve compound profit-takes after 4 bins up and does not reshape twice",
   assert.equal(three.events.length, 0);
   const taken = simulateLiquidity(compounded.position, observe(124, 61_000), rules, 61_000);
   assert.equal(taken.events.length, 1);
+  assert.equal(taken.events.filter(item => item.kind === "reshape").length, 0);
   const profit = taken.events[0];
   assert.equal(profit.kind, "profit-take");
   assert.equal(profit.profitTake, true);
@@ -239,7 +249,30 @@ test("a curve compound profit-takes after 4 bins up and does not reshape twice",
   const mid = simulateLiquidity(midSeed.position, atDistance(120, 0, 5, 15), rules, 0);
   assert.equal(mid.events[0].tokenShape, "spot");
   const noTake = simulateLiquidity(mid.position, observe(124, 61_000), rules, 61_000);
-  assert.equal(noTake.events.length, 0);
+  assert.equal(noTake.events.filter(item => item.kind === "profit-take").length, 0);
+  assert.equal(noTake.events[0].kind, "reshape");
+  assert.equal(noTake.events[0].firstPump, true);
+});
+
+test("halfway through the range reshapes both sides, and 49% stays one side", () => {
+  const span = { lowerBin: 0, upperBin: 100 };
+  const open = (bin) => simulateLiquidity(position(span), { ...observe(bin, 0), ...span }, rules, 0);
+  const below = simulateLiquidity(open(0).position, { ...observe(49, 61_000), ...span }, rules, 61_000);
+  assert.equal(below.events[0].reshapedSide, "sol");
+  assert.ok(Math.abs(below.events[0].rangeFraction - 0.49) < 1e-9);
+  assert.equal(below.events[0].inRangeMode, "one_side");
+  const halfway = simulateLiquidity(open(0).position, { ...observe(50, 61_000), ...span }, rules, 61_000);
+  assert.equal(halfway.events[0].reshapedSide, "both");
+  assert.equal(halfway.events[0].keptSide, null);
+  assert.equal(halfway.events[0].inRangeMode, "both_sides_full");
+  assert.ok(Math.abs(halfway.events[0].rangeFraction - 0.5) < 1e-9);
+  assert.deepEqual(halfway.events[0].legs, ["spot", "bidask"]);
+  const dumped = simulateLiquidity(open(100).position, { ...observe(50, 61_000), ...span }, rules, 61_000);
+  assert.equal(dumped.events[0].direction, "down");
+  assert.equal(dumped.events[0].reshapedSide, "both");
+  const shallow = simulateLiquidity(open(100).position, { ...observe(51, 61_000), ...span }, rules, 61_000);
+  assert.equal(shallow.events[0].reshapedSide, "token");
+  assert.ok(shallow.events[0].rangeFraction < 0.5);
 });
 
 test("the liquidity simulator has no transaction or submit path", () => {

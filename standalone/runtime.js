@@ -24,7 +24,9 @@ import { getDeterministicCloseRule, computeBinsBelow } from "../exit-rules.js";
 import { startAdmin } from "./telegram-admin.js";
 import { planShadowEntry, stepShadowBook } from "../strategy/shadow.js";
 import { liquidityCloseSummary, simulateLiquidity } from "../strategy/liquidity-management.js";
-import { recordExit, recordLiquidity, recordScreening } from "./decisions.js";
+import { liquidityLiveGate, maintainLivePosition } from "../strategy/liquidity-live.js";
+import { withWalletLock } from "./transactions.js";
+import { recordExit, recordLiquidity, recordLiveLiquidity, recordScreening } from "./decisions.js";
 import { createGmgnGate, createMarketData, createRequestBudget } from "../strategy/market-data.js";
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -597,6 +599,46 @@ async function finalRecheck(signal, screened) {
 
 // ─── Exits (deterministic, no LLM) ──────────────────────────────────────────
 
+function liquidityGateFor(kind) {
+  const rules = config.ownerStrategy;
+  const execute = kind === "compound" || kind === "profit-take"
+    ? rules?.autoCompound?.execute === true
+    : rules?.reshapeLiquidity?.execute === true;
+  return liquidityLiveGate({
+    shadowMode: config.standalone.shadow,
+    dryRunBlocksSubmit: transactionsAreDryRun(),
+    walletKeyPresent: typeof process.env.WALLET_PRIVATE_KEY === "string" && process.env.WALLET_PRIVATE_KEY.length > 0,
+    execute,
+  });
+}
+
+// Real compound and reshape. The current build's shadow lock makes the gate
+// fail before any pool, key, or transaction object is touched.
+async function maintainLiveLiquidity(portfolio) {
+  if (!["compound", "profit-take", "reshape"].some(kind => liquidityGateFor(kind).allowed)) {
+    return { handled: false, claimed: false };
+  }
+  const { createLiquidityIo } = await import("../tools/liquidity-live.js");
+  return withWalletLock(() => maintainLivePosition(portfolio, {
+    rules: config.ownerStrategy,
+    now: Date.now(),
+    gate: liquidityGateFor,
+    load: () => store?.data?.liquidityByPosition?.[portfolio.position] || null,
+    save: (saved) => {
+      if (!store?.data) return;
+      if (!store.data.liquidityByPosition) store.data.liquidityByPosition = {};
+      store.data.liquidityByPosition[portfolio.position] = saved;
+      store.save();
+    },
+    record: recordLiveLiquidity,
+    alert: (message) => {
+      log("liquidity", message);
+      if (tgEnabled()) tgSend(message).catch(() => {});
+    },
+    createIo: () => createLiquidityIo(portfolio.pool),
+  }));
+}
+
 // One management pass: trailing/rule exits and fee claims. Never triggers
 // screening — an empty portfolio just waits for the next convergence signal.
 export async function manageOnce() {
@@ -612,6 +654,7 @@ export async function manageOnce() {
     noteShadowLiquidity(live.positions);
     if (live.positions.length === 0) return "No open positions";
     for (const p of live.positions) {
+      const liveMaintenance = await maintainLiveLiquidity(p);
       recordPositionSnapshot(p.pool, p);
       // Slow backstop: raise peaks immediately and act on detected exits.
       // Real-time confirmation lives in the fast poller below.
@@ -623,7 +666,7 @@ export async function manageOnce() {
       let action = null;
       if (closeRule?.action === "CLOSE") {
         action = { tool: "close_position", args: { position_address: p.position, reason: closeRule.reason }, label: `close (${closeRule.reason})` };
-      } else if ((p.unclaimed_fees_usd ?? 0) >= config.management.minClaimAmount) {
+      } else if (!liveMaintenance.claimed && (p.unclaimed_fees_usd ?? 0) >= config.management.minClaimAmount) {
         action = { tool: "claim_fees", args: { position_address: p.position }, label: "claim fees" };
       }
       // LLM-set free-text instructions have no execution path in standalone — hold.

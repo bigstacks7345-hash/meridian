@@ -91,6 +91,23 @@ function getWallet() {
   return _wallet;
 }
 
+export function liquidityClients() {
+  const owner = getWallet();
+  return { connection: getConnection(), owner, publicKey: owner.publicKey };
+}
+
+export async function liquiditySdk() {
+  return getDLMM();
+}
+
+export async function openDlmmPool(poolAddress) {
+  return getPool(poolAddress);
+}
+
+export async function assertBinArraysReady(pool, minBinId, maxBinId) {
+  await assertRangeDoesNotRequireBinArrayInitialization(pool, minBinId, maxBinId);
+}
+
 function getDlmmProgramId() {
   return new PublicKey("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo");
 }

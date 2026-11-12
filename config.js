@@ -68,7 +68,6 @@ function mergeOwnerStrategy(overrides) {
   for (const key of ["crashGuard", "poolDepth", "autoCompound", "reshapeLiquidity"]) {
     const override = source[key];
     merged[key] = { ...OWNER_STRATEGY[key], ...(override && typeof override === "object" ? override : {}) };
-    merged[key].execute = false;
   }
   const compoundOverride = source.autoCompound && typeof source.autoCompound === "object" ? source.autoCompound : {};
   merged.autoCompound.curveProfitTake = {
@@ -82,7 +81,6 @@ function mergeOwnerStrategy(overrides) {
   if (!Array.isArray(compoundOverride.bands) || compoundOverride.bands.length === 0) {
     merged.autoCompound.bands = OWNER_STRATEGY.autoCompound.bands;
   }
-  merged.autoCompound.execute = false;
   return merged;
 }
 const ownerStrategy = mergeOwnerStrategy(u.ownerStrategy);
