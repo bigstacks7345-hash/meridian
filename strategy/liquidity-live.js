@@ -2,11 +2,26 @@
 // builds and sends when every gate is open. A closed gate returns the
 // simulation unchanged and does not touch a pool.
 
-import { ComputeBudgetProgram, Transaction } from "@solana/web3.js";
+import { ComputeBudgetProgram, PublicKey, SystemProgram, Transaction, TransactionInstruction } from "@solana/web3.js";
 import BN from "bn.js";
 import { simulateLiquidity } from "./liquidity-management.js";
+import {
+  DEFAULT_CHUNK_BINS,
+  REMOVE_ALL_BPS,
+  SHRINK_NO_SHRINK_BOTH,
+  binRange,
+  chunkDistribution,
+  liquidityDistribution,
+  splitHalf,
+} from "./hybrid-weights.js";
 
 const COMPUTE_UNIT_LIMIT = 1_400_000;
+const DEFAULT_CU_PRICE = 500;
+const DEFAULT_ADD_BACK_CU_PRICE = 1_000;
+const DEFAULT_ADD_BACK_TIP = 10_000;
+const DEFAULT_CU_MARGIN = 0.15;
+const DEFAULT_MAX_TX_BYTES = 1_232;
+const DEFAULT_TIP_ACCOUNT = "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5";
 const DEFAULT_SLIPPAGE_PCT = 1;
 const DEFAULT_DRIFT_BINS = 2;
 const DEFAULT_PRIORITY_FEE_SOL = 0.00002;
@@ -334,6 +349,195 @@ async function compound(event, plan, onchain, position, intended, rules, io, rec
   return { event: done, advanced: true };
 }
 
+function isPublicKey(value) {
+  return value instanceof PublicKey;
+}
+
+function payerKey(io) {
+  if (isPublicKey(io.owner)) return io.owner;
+  try { return new PublicKey(io.owner); } catch { return SystemProgram.programId; }
+}
+
+function tipAccount(rules) {
+  const configured = rules?.reshapeLiquidity?.jitoTipAccount || DEFAULT_TIP_ACCOUNT;
+  return new PublicKey(configured);
+}
+
+function estimateBytes(descriptors) {
+  let bytes = 180;
+  for (const item of descriptors) bytes += 64 + (item.binCount || 0) * 8;
+  return bytes;
+}
+
+function asInstruction(descriptor) {
+  return new TransactionInstruction({
+    programId: SystemProgram.programId,
+    keys: [],
+    data: Buffer.from(descriptor.name || "ix"),
+  });
+}
+
+function budgeted(descriptors, { cuPrice, cuLimit, tipLamports, payer, tipTo }) {
+  const tx = new Transaction();
+  tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: cuLimit }));
+  tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: cuPrice }));
+  if (tipLamports > 0) {
+    tx.add(SystemProgram.transfer({ fromPubkey: payer, toPubkey: tipTo, lamports: tipLamports }));
+  }
+  for (const item of descriptors) tx.add(asInstruction(item));
+  return tx;
+}
+
+async function sendPacked(descriptors, options, io) {
+  const margin = Number.isFinite(options.margin) ? options.margin : DEFAULT_CU_MARGIN;
+  const probe = budgeted(descriptors, { ...options, cuLimit: COMPUTE_UNIT_LIMIT, tipLamports: 0 });
+  const simulated = await io.connection.simulateTransaction(probe, io.signers || []);
+  const value = simulated?.value ?? simulated;
+  if (value?.err) {
+    const error = new Error("transaction simulation failed");
+    error.abort = true;
+    error.detail = value.err;
+    throw error;
+  }
+  const consumed = Number(value?.unitsConsumed);
+  const cuLimit = Number.isFinite(consumed) && consumed > 0
+    ? Math.min(COMPUTE_UNIT_LIMIT, Math.max(1, Math.ceil(consumed * (1 + margin))))
+    : COMPUTE_UNIT_LIMIT;
+  const tx = budgeted(descriptors, { ...options, cuLimit });
+  io.batches = io.batches || [];
+  io.batches.push({
+    names: descriptors.map(item => item.name),
+    legs: descriptors.map(item => item.leg || null),
+    cuPriceMicroLamports: options.cuPrice,
+    cuLimit,
+    jitoTipLamports: options.tipLamports || 0,
+  });
+  let last = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const signature = await io.send(tx);
+      io.signatures.push(signature);
+      return signature;
+    } catch (error) {
+      last = error;
+      if (attempt === 3 || error.abort) throw error;
+    }
+  }
+  throw last;
+}
+
+async function executeHybrid(event, plan, amounts, position, intended, rules, io, record, alert) {
+  const bins = binRange(plan.fromBinId, plan.toBinId);
+  const [spotX, bidX] = splitHalf(amounts.x);
+  const [spotY, bidY] = splitHalf(amounts.y);
+  const chunkBins = Number(rules?.reshapeLiquidity?.chunkBins) || DEFAULT_CHUNK_BINS;
+  const spotChunks = chunkDistribution(liquidityDistribution(bins, plan.activeBin, "spot"), spotX, spotY, chunkBins, "spot");
+  const bidChunks = chunkDistribution(liquidityDistribution(bins, plan.activeBin, "bidask"), bidX, bidY, chunkBins, "bidask");
+  const remove = await io.pool.rebalanceLiquidity({
+    position: position.id,
+    user: io.owner,
+    fromBinId: plan.fromBinId,
+    toBinId: plan.toBinId,
+    bps: REMOVE_ALL_BPS,
+    adds: [],
+    shrinkMode: SHRINK_NO_SHRINK_BOTH,
+    shouldClaimFee: false,
+    maxActiveBinSlippage: Number(rules?.reshapeLiquidity?.maxActiveBinSlippage ?? 32767),
+  });
+  const removeIx = { ...(remove || {}), name: "rebalanceLiquidity", binCount: 0, leg: null };
+  const addIxs = [];
+  for (const chunk of [...spotChunks, ...bidChunks]) {
+    const built = await io.pool.addLiquidity2({
+      position: position.id,
+      user: io.owner,
+      leg: chunk.leg,
+      amountX: chunk.amountX,
+      amountY: chunk.amountY,
+      binLiquidityDist: chunk.binLiquidityDist,
+    });
+    addIxs.push({
+      ...(built || {}),
+      name: "addLiquidity2",
+      leg: chunk.leg,
+      binCount: chunk.binCount,
+      amountX: chunk.amountX,
+      amountY: chunk.amountY,
+      binLiquidityDist: chunk.binLiquidityDist,
+    });
+  }
+  const reshapeRules = rules?.reshapeLiquidity || {};
+  const onePrice = Number(reshapeRules.cuPriceMicroLamports ?? DEFAULT_CU_PRICE);
+  const addPrice = Number(reshapeRules.addBackCuPriceMicroLamports ?? DEFAULT_ADD_BACK_CU_PRICE);
+  const tip = Number(reshapeRules.addBackJitoTipLamports ?? DEFAULT_ADD_BACK_TIP);
+  const maxBytes = Number(reshapeRules.maxTxBytes ?? DEFAULT_MAX_TX_BYTES);
+  const margin = Number(reshapeRules.cuLimitMargin ?? DEFAULT_CU_MARGIN);
+  const payer = payerKey(io);
+  const tipTo = tipAccount(rules);
+  const packed = [removeIx, ...addIxs];
+  const options = { payer, tipTo, margin };
+  if (estimateBytes(packed) <= maxBytes) {
+    const signature = await sendPacked(packed, { ...options, cuPrice: onePrice, tipLamports: 0 }, io);
+    const done = liveEvent(event, {
+      executed: true,
+      signatures: [signature],
+      steps: packed.map(item => item.name),
+      legs: ["spot", "bidask"],
+      inRangeMode: plan.side === "both" || event.inRangeMode === "both_sides_full" ? "both_sides_full" : "one_side",
+      removeBps: REMOVE_ALL_BPS,
+      shrinkMode: SHRINK_NO_SHRINK_BOTH,
+      profitTake: false,
+    });
+    record?.(done);
+    return { event: done, advanced: true };
+  }
+  const removedSig = await sendPacked([removeIx], { ...options, cuPrice: onePrice, tipLamports: 0 }, io);
+  const recovery = {
+    kind: event.kind,
+    phase: "removed",
+    positionId: position.id,
+    fromBinId: plan.fromBinId,
+    toBinId: plan.toBinId,
+    adds: addIxs.map(item => ({
+      leg: item.leg,
+      amountX: item.amountX.toString(),
+      amountY: item.amountY.toString(),
+      binLiquidityDist: item.binLiquidityDist,
+      binCount: item.binCount,
+    })),
+    snapshot: positionSnapshot(intended),
+    hybrid: true,
+  };
+  await io.persist?.(remembered(position, { recovery }));
+  try {
+    const addedSig = await sendPacked(addIxs, { ...options, cuPrice: addPrice, tipLamports: tip }, io);
+    const done = liveEvent(event, {
+      executed: true,
+      signatures: [removedSig, addedSig],
+      steps: ["rebalanceLiquidity", "addLiquidity2"],
+      split: true,
+      legs: ["spot", "bidask"],
+      removeBps: REMOVE_ALL_BPS,
+      shrinkMode: SHRINK_NO_SHRINK_BOTH,
+    });
+    record?.(done);
+    return { event: done, advanced: true };
+  } catch (error) {
+    const partial = liveEvent(event, {
+      executed: false,
+      partial: true,
+      phase: "removed",
+      split: true,
+      signatures: [removedSig],
+      steps: ["rebalanceLiquidity"],
+    });
+    record?.(partial);
+    alert?.(`liquidity ${event.kind} removed bins ${plan.fromBinId}-${plan.toBinId} on ${position?.id} but the add did not confirm`);
+    error.recovery = recovery;
+    error.event = partial;
+    throw error;
+  }
+}
+
 async function reshape(event, plan, onchain, position, intended, rules, io, record, alert) {
   const amounts = sideAmounts(onchain, plan);
   if (amounts.x.isZero() && amounts.y.isZero()) {
@@ -341,6 +545,9 @@ async function reshape(event, plan, onchain, position, intended, rules, io, reco
     record?.(skipped);
     alert?.(`liquidity ${event.kind} found no liquidity in ${plan.fromBinId}-${plan.toBinId} on ${position?.id}`);
     return { event: skipped, advanced: false };
+  }
+  if (plan.shape === "spot_bidask_5050") {
+    return executeHybrid(event, plan, amounts, position, intended, rules, io, record, alert);
   }
   const legs = addLegs(plan, amounts, io.strategyTypes);
   if (!sameWindow(plan, legs)) throw new Error("add window left the removed range");
@@ -417,12 +624,37 @@ function positionSnapshot(position) {
   return liquidity;
 }
 
+async function resendHybridAdds(recovery, rules, io, positionId) {
+  const addIxs = [];
+  for (const add of recovery.adds || []) {
+    const built = await io.pool.addLiquidity2({
+      position: positionId,
+      user: io.owner,
+      leg: add.leg,
+      amountX: bn(add.amountX),
+      amountY: bn(add.amountY),
+      binLiquidityDist: add.binLiquidityDist,
+    });
+    addIxs.push({ ...(built || {}), name: "addLiquidity2", leg: add.leg, binCount: add.binCount || add.binLiquidityDist?.length || 0 });
+  }
+  const reshapeRules = rules?.reshapeLiquidity || {};
+  const signature = await sendPacked(addIxs, {
+    cuPrice: Number(reshapeRules.addBackCuPriceMicroLamports ?? DEFAULT_ADD_BACK_CU_PRICE),
+    tipLamports: Number(reshapeRules.addBackJitoTipLamports ?? DEFAULT_ADD_BACK_TIP),
+    margin: Number(reshapeRules.cuLimitMargin ?? DEFAULT_CU_MARGIN),
+    payer: payerKey(io),
+    tipTo: tipAccount(rules),
+  }, io);
+  return { signatures: [signature], steps: addIxs.map(item => item.name) };
+}
+
 async function recover(position, rules, io, record, alert) {
   const recovery = position.liquidity.recovery;
   io.signatures = [];
-  const adds = (recovery.adds || []).map(hydrateAdd);
   try {
-    const added = await submitAdds(adds, io, rules, position.id);
+    const added = recovery.hybrid
+      ? await resendHybridAdds(recovery, rules, io, position.id)
+      : await submitAdds((recovery.adds || []).map(hydrateAdd), io, rules, position.id);
     const done = {
       type: "liquidity-sim",
       kind: recovery.kind,

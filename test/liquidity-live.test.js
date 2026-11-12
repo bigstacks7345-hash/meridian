@@ -50,7 +50,7 @@ function ioFor(active) {
     connection: {
       simulateTransaction: async (tx) => {
         calls.push({ op: "simulate", instructions: tx.instructions?.length ?? 0 });
-        return { value: { err: io.simulateErr || null } };
+        return { value: { err: io.simulateErr || null, unitsConsumed: io.unitsConsumed ?? 1000 } };
       },
     },
     send: async () => {
@@ -59,6 +59,7 @@ function ioFor(active) {
         io.failSends -= 1;
         throw new Error("blockhash not found");
       }
+      if (io.failAddBack && (io.batches?.length || 0) >= 2) throw new Error("add failed");
       return `sig-${io.sends}`;
     },
     pool: {
@@ -69,6 +70,23 @@ function ioFor(active) {
       removeLiquidity: async (args) => {
         calls.push({ op: "remove", fromBinId: args.fromBinId, toBinId: args.toBinId, bps: args.bps.toString(), shouldClaimAndClose: args.shouldClaimAndClose });
         return [new Transaction()];
+      },
+      rebalanceLiquidity: async (args) => {
+        calls.push({ op: "rebalanceLiquidity", fromBinId: args.fromBinId, toBinId: args.toBinId, bps: args.bps, shrinkMode: args.shrinkMode, adds: args.adds, shouldClaimFee: args.shouldClaimFee });
+        return { name: "rebalanceLiquidity" };
+      },
+      addLiquidity2: async (args) => {
+        calls.push({
+          op: "addLiquidity2",
+          leg: args.leg,
+          x: args.amountX.toString(),
+          y: args.amountY.toString(),
+          bins: args.binLiquidityDist.map(row => row.binId),
+          distributionX: args.binLiquidityDist.map(row => row.distributionX),
+          distributionY: args.binLiquidityDist.map(row => row.distributionY),
+        });
+        if (io.failAdd) throw new Error("add failed");
+        return { name: "addLiquidity2", leg: args.leg };
       },
       claimSwapFee: async () => {
         calls.push({ op: "claimFee" });
@@ -211,17 +229,22 @@ test("a dump reshapes only the token side and a pump reshapes only the SOL windo
     gate: gate(["reshape"]),
     io: dumpIo,
   });
-  const dump = removes(dumpIo)[0];
+  const dump = dumpIo.calls.find(call => call.op === "rebalanceLiquidity");
   assert.equal(dumped.events[0].executed, true);
+  assert.equal(dumped.events[0].shrinkMode, 3);
+  assert.deepEqual(dumped.events[0].legs, ["spot", "bidask"]);
   assert.equal(dump.fromBinId, 114);
   assert.equal(dump.toBinId, 220);
-  assert.equal(dump.bps, "10000");
-  assert.equal(dump.shouldClaimAndClose, false);
-  const dumpAdds = adds(dumpIo);
-  assert.deepEqual(dumpAdds.map(row => row.strategyType), ["Spot", "BidAsk"]);
-  assert.ok(dumpAdds.every(row => row.minBinId === 114 && row.maxBinId === 220 && row.slippage === 1));
-  assert.ok(dumpAdds.every(row => row.y === "0"));
-  assert.ok(dumpIo.calls.filter(call => call.op === "simulate").every(call => call.instructions >= 2));
+  assert.equal(dump.bps, 10000);
+  assert.equal(dump.shrinkMode, 3);
+  assert.deepEqual(dump.adds, []);
+  assert.equal(dump.shouldClaimFee, false);
+  const dumpAdds = dumpIo.calls.filter(call => call.op === "addLiquidity2");
+  assert.ok(dumpAdds.some(row => row.leg === "spot") && dumpAdds.some(row => row.leg === "bidask"));
+  assert.ok(dumpAdds.every(row => row.bins.length <= 45 && row.y === "0"));
+  const spotX = dumpAdds.filter(row => row.leg === "spot").reduce((sum, row) => sum + Number(row.x), 0);
+  const bidX = dumpAdds.filter(row => row.leg === "bidask").reduce((sum, row) => sum + Number(row.x), 0);
+  assert.ok(Math.abs(spotX - bidX) <= 1);
 
   const pumpIo = ioFor(141);
   const pumpSeed = await seeded(pumpIo);
@@ -244,12 +267,26 @@ test("a dump reshapes only the token side and a pump reshapes only the SOL windo
     gate: gate(["reshape"]),
     io: pumpIo,
   });
-  const pump = removes(pumpIo)[0];
+  const pump = pumpIo.calls.find(call => call.op === "rebalanceLiquidity");
   assert.equal(pumped.events[0].executed, true);
   assert.equal(pump.fromBinId, 121);
   assert.equal(pump.toBinId, 140);
-  assert.equal(pump.shouldClaimAndClose, false);
-  assert.ok(adds(pumpIo).every(row => row.minBinId === 121 && row.maxBinId === 140 && row.x === "0"));
+  assert.equal(pump.shrinkMode, 3);
+  assert.deepEqual(pump.adds, []);
+  const pumpAdds = pumpIo.calls.filter(call => call.op === "addLiquidity2");
+  assert.deepEqual(pumpAdds.map(row => row.leg), ["spot", "bidask"]);
+  assert.ok(pumpAdds.every(row => row.x === "0" && row.bins[0] === 121 && row.bins.at(-1) === 140));
+  assert.equal(pumpIo.batches.length, 1);
+  assert.deepEqual(pumpIo.batches[0].names, ["rebalanceLiquidity", "addLiquidity2", "addLiquidity2"]);
+  assert.equal(pumpIo.batches[0].cuPriceMicroLamports, 500);
+  assert.equal(pumpIo.batches[0].jitoTipLamports, 0);
+  assert.equal(pumpIo.batches[0].cuLimit, 1150);
+  const spotLeg = pumpAdds.find(row => row.leg === "spot");
+  const bidLeg = pumpAdds.find(row => row.leg === "bidask");
+  assert.equal(spotLeg.distributionY[0], spotLeg.distributionY.at(-1));
+  assert.ok(bidLeg.distributionY[0] > bidLeg.distributionY.at(-1));
+  assert.equal(spotLeg.distributionY.reduce((sum, value) => sum + value, 0), 10_000);
+  assert.equal(bidLeg.distributionY.reduce((sum, value) => sum + value, 0), 10_000);
   const again = await runLiquidityExecution({
     position: pumped.position,
     observation: observe(130, 70_000),
@@ -259,7 +296,7 @@ test("a dump reshapes only the token side and a pump reshapes only the SOL windo
     io: pumpIo,
   });
   assert.equal(again.events.length, 0);
-  assert.equal(removes(pumpIo).length, 1);
+  assert.equal(pumpIo.calls.filter(call => call.op === "rebalanceLiquidity").length, 1);
 });
 
 test("compound bands claim fees and put each side back in its shape", async () => {
@@ -456,12 +493,12 @@ test("drift, simulation failure, and a lost add are recovered without a second r
   });
   assert.equal(aborted.events[0].executed, false);
   assert.match(aborted.events[0].aborted, /simulation failed/);
-  assert.equal(removes(rejected).length, 1);
+  assert.equal(rejected.calls.filter(call => call.op === "rebalanceLiquidity").length, 1);
   assert.equal(rejected.sends, 0);
   assert.equal(aborted.position.liquidity.recovery, undefined);
 
   const partial = ioFor(114);
-  partial.failAdd = true;
+  partial.failAddBack = true;
   const partialSeed = await seeded(partial);
   const broken = await runLiquidityExecution({
     position: partialSeed.position,
@@ -475,8 +512,8 @@ test("drift, simulation failure, and a lost add are recovered without a second r
   assert.equal(broken.events[0].partial, true);
   assert.equal(broken.events[0].phase, "removed");
   assert.equal(broken.position.liquidity.recovery.phase, "removed");
-  assert.equal(removes(partial).length, 1);
-  partial.failAdd = false;
+  assert.equal(partial.calls.filter(call => call.op === "rebalanceLiquidity").length, 1);
+  partial.failAddBack = false;
   const repaired = await runLiquidityExecution({
     position: broken.position,
     observation: observe(114, 130_000),
@@ -487,7 +524,9 @@ test("drift, simulation failure, and a lost add are recovered without a second r
   });
   assert.equal(repaired.recovered, true);
   assert.equal(repaired.events[0].executed, true);
-  assert.equal(removes(partial).length, 1);
+  assert.equal(partial.calls.filter(call => call.op === "rebalanceLiquidity").length, 1);
+  assert.equal(partial.batches.at(-1).jitoTipLamports, 10_000);
+  assert.equal(partial.batches.at(-1).cuPriceMicroLamports, 1_000);
   assert.equal(repaired.position.liquidity.recovery, null);
   assert.ok(alerts.some(message => message.includes("add did not confirm")));
 
@@ -504,4 +543,80 @@ test("drift, simulation failure, and a lost add are recovered without a second r
   });
   assert.equal(retried.events[0].executed, true);
   assert.ok(retry.sends >= 3);
+});
+
+test("hybrid weights, 45-bin chunks, and both in-range modes", async () => {
+  const { splitHalf, liquidityDistribution, WEIGHT_BPS } = await import("../strategy/hybrid-weights.js");
+  const { simulateLiquidity } = await import("../strategy/liquidity-management.js");
+  const [first, second] = splitHalf(new BN(1001));
+  assert.equal(first.toString(), "500");
+  assert.equal(second.toString(), "501");
+  assert.equal(first.add(second).toString(), "1001");
+  const bins = [];
+  for (let bin = 10; bin <= 14; bin++) bins.push(bin);
+  const spot = liquidityDistribution(bins, 12, "spot");
+  const bid = liquidityDistribution(bins, 12, "bidask");
+  assert.equal(spot.reduce((sum, row) => sum + row.distributionX, 0), WEIGHT_BPS);
+  assert.equal(bid.reduce((sum, row) => sum + row.distributionY, 0), WEIGHT_BPS);
+  const spotX = spot.filter(row => row.binId >= 12).map(row => row.distributionX);
+  assert.equal(Math.max(...spotX) - Math.min(...spotX) <= 1, true);
+  const below = bid.filter(row => row.binId <= 12);
+  assert.ok(below[0].distributionY > below.at(-1).distributionY);
+
+  const wideRules = {
+    ...rules,
+    reshapeLiquidity: { ...rules.reshapeLiquidity, maxTxBytes: 20_000 },
+  };
+  const wide = ioFor(30);
+  const seededWide = await runLiquidityExecution({
+    position: { id: "wide", lowerBin: 0, upperBin: 89, openedAt: 0 },
+    observation: { ...observe(40, 0), activeBin: 40, lowerBin: 0, upperBin: 89 },
+    rules: wideRules,
+    now: 0,
+    gate: gate(["reshape"]),
+    io: wide,
+  });
+  wide.inventoryActive = 34;
+  wide.liveBin = 34;
+  const chunked = await runLiquidityExecution({
+    position: seededWide.position,
+    observation: { ...observe(34, 61_000), activeBin: 34, lowerBin: 0, upperBin: 89 },
+    rules: wideRules,
+    now: 61_000,
+    gate: gate(["reshape"]),
+    io: wide,
+  });
+  const chunks = wide.calls.filter(call => call.op === "addLiquidity2");
+  assert.equal(chunked.events[0].executed, true);
+  assert.ok(chunks.some(row => row.bins.length === 45));
+  assert.ok(chunks.every(row => row.bins.length <= 45));
+  assert.equal(wide.batches.length, 1);
+  assert.equal(wide.batches[0].names[0], "rebalanceLiquidity");
+
+  const fullRules = {
+    ...rules,
+    reshapeLiquidity: { ...rules.reshapeLiquidity, inRangeMode: "both_sides_full", maxTxBytes: 20_000 },
+  };
+  const fullIo = ioFor(114);
+  const fullSeed = simulateLiquidity(
+    { id: "full", lowerBin: 100, upperBin: 140, openedAt: 0 },
+    { ...observe(120, 0), lowerBin: 100, upperBin: 140 },
+    fullRules,
+    0,
+  );
+  const full = await runLiquidityExecution({
+    position: fullSeed.position,
+    observation: { ...observe(114, 61_000), lowerBin: 100, upperBin: 140 },
+    rules: fullRules,
+    now: 61_000,
+    gate: gate(["reshape"]),
+    io: fullIo,
+  });
+  const removed = fullIo.calls.find(call => call.op === "rebalanceLiquidity");
+  assert.equal(full.events[0].inRangeMode, "both_sides_full");
+  assert.equal(full.events[0].reshapedSide, "both");
+  assert.deepEqual(full.events[0].legs, ["spot", "bidask"]);
+  assert.equal(removed.fromBinId, 100);
+  assert.equal(removed.toBinId, 140);
+  assert.equal(full.events[0].shrinkMode, 3);
 });
