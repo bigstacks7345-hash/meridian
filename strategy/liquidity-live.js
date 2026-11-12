@@ -97,7 +97,7 @@ export function planLiquidityAction(event, observation = {}) {
     if (!window) return null;
     return { kind: "reshape", activeBin: active, shape: event.shapeAfter || "spot_bidask_5050", side: "token", ...window };
   }
-  const width = Number(event.pumpReshapeBins || event.binsMoved || 20);
+  const width = Number(event.binsMoved ?? event.pumpReshapeBins ?? 20);
   const window = clampWindow(active - width, active - 1, lower, upper);
   if (!window) return null;
   return { kind: "reshape", activeBin: active, shape: event.shapeAfter || "spot_bidask_5050", side: "sol", ...window };

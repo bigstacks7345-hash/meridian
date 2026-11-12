@@ -246,22 +246,20 @@ test("a dump reshapes only the token side and a pump reshapes only the SOL windo
   const bidX = dumpAdds.filter(row => row.leg === "bidask").reduce((sum, row) => sum + Number(row.x), 0);
   assert.ok(Math.abs(spotX - bidX) <= 1);
 
-  const pumpIo = ioFor(141);
+  const pumpIo = ioFor(124);
   const pumpSeed = await seeded(pumpIo);
-  for (const binsUp of [6, 19, 20]) {
-    const quiet = await runLiquidityExecution({
-      position: pumpSeed.position,
-      observation: observe(120 + binsUp, 61_000),
-      rules,
-      now: 61_000,
-      gate: gate(["reshape"]),
-      io: pumpIo,
-    });
-    assert.equal(quiet.events.length, 0, `${binsUp} bins`);
-  }
+  const tooSoon = await runLiquidityExecution({
+    position: pumpSeed.position,
+    observation: observe(123, 61_000),
+    rules,
+    now: 61_000,
+    gate: gate(["reshape"]),
+    io: pumpIo,
+  });
+  assert.equal(tooSoon.events.length, 0);
   const pumped = await runLiquidityExecution({
     position: pumpSeed.position,
-    observation: observe(141, 61_000),
+    observation: observe(124, 61_000),
     rules,
     now: 61_000,
     gate: gate(["reshape"]),
@@ -269,13 +267,15 @@ test("a dump reshapes only the token side and a pump reshapes only the SOL windo
   });
   const pump = pumpIo.calls.find(call => call.op === "rebalanceLiquidity");
   assert.equal(pumped.events[0].executed, true);
-  assert.equal(pump.fromBinId, 121);
-  assert.equal(pump.toBinId, 140);
+  assert.equal(pumped.events[0].firstPump, true);
+  assert.equal(pumped.events[0].reshapedSide, "sol");
+  assert.equal(pump.fromBinId, 120);
+  assert.equal(pump.toBinId, 123);
   assert.equal(pump.shrinkMode, 3);
   assert.deepEqual(pump.adds, []);
   const pumpAdds = pumpIo.calls.filter(call => call.op === "addLiquidity2");
   assert.deepEqual(pumpAdds.map(row => row.leg), ["spot", "bidask"]);
-  assert.ok(pumpAdds.every(row => row.x === "0" && row.bins[0] === 121 && row.bins.at(-1) === 140));
+  assert.ok(pumpAdds.every(row => row.x === "0" && row.bins[0] === 120 && row.bins.at(-1) === 123));
   assert.equal(pumpIo.batches.length, 1);
   assert.deepEqual(pumpIo.batches[0].names, ["rebalanceLiquidity", "addLiquidity2", "addLiquidity2"]);
   assert.equal(pumpIo.batches[0].cuPriceMicroLamports, 500);
@@ -455,8 +455,9 @@ test("a curve compound profit-takes after 4 bins and does not reshape twice", as
     gate: gate(["profit-take", "reshape"]),
     io: mid,
   });
-  assert.equal(noTake.events.length, 0);
-  assert.equal(removes(mid).length, 0);
+  assert.equal(noTake.events.filter(item => item.kind === "profit-take").length, 0);
+  assert.equal(noTake.events[0].kind, "reshape");
+  assert.equal(noTake.events[0].firstPump, true);
 });
 
 test("drift, simulation failure, and a lost add are recovered without a second remove", async () => {
