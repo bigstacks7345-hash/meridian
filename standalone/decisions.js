@@ -229,6 +229,11 @@ export function recordLiquidity(event, now = Date.now()) {
   return appendDecision({ ...event, simulated: true, executed: false, executionDisabled: true }, now);
 }
 
+// A confirmed live compound or reshape. Shadow records keep going through recordLiquidity.
+export function recordLiveLiquidity(event, now = Date.now()) {
+  return appendDecision({ ...event, simulated: false, executionDisabled: false }, now);
+}
+
 export function recordExit(input) {
   const now = input.now ?? Date.now();
   const record = buildExitRecord({ ...input, now });
