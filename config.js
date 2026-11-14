@@ -188,6 +188,29 @@ export const config = {
     minBinsBelow: strategyMinBinsBelow,
     maxBinsBelow: strategyMaxBinsBelow,
     defaultBinsBelow: strategyDefaultBinsBelow,
+    // Used when strategy = "volume_profile": liquidity per bin follows recent traded volume.
+    volumeProfile: {
+      fallback:            u.volumeProfile?.fallback            ?? "bid_ask", // preset used if shaping fails or range > 69 bins
+      timeframe:           u.volumeProfile?.timeframe           ?? "minute",
+      aggregate:           u.volumeProfile?.aggregate           ?? 1,
+      lookbackCandles:     u.volumeProfile?.lookbackCandles     ?? 240,
+      smoothBins:          u.volumeProfile?.smoothBins          ?? 1,
+      floorPct:            u.volumeProfile?.floorPct            ?? 0.05,
+      power:               u.volumeProfile?.power               ?? 1,
+      halfLifeCandles:     u.volumeProfile?.halfLifeCandles     ?? 0,
+      minInRangeVolumePct: u.volumeProfile?.minInRangeVolumePct ?? 10,
+      maxPriceMismatchPct: u.volumeProfile?.maxPriceMismatchPct ?? 25,
+      shapeMode:           u.volumeProfile?.shapeMode           ?? "curves",
+      clusterThresholdPct: u.volumeProfile?.clusterThresholdPct ?? 30,
+      minSigmaBins:        u.volumeProfile?.minSigmaBins        ?? 1.5,
+      // strategy = "double_sided_volume_profile": SOL below price, token above, range from the volume clusters
+      doubleSided: {
+        maxBelowPct:  u.volumeProfile?.doubleSided?.maxBelowPct  ?? 38,
+        maxAbovePct:  u.volumeProfile?.doubleSided?.maxAbovePct  ?? 30,
+        valueAreaPct: u.volumeProfile?.doubleSided?.valueAreaPct ?? 70,
+        maxTokenSharePct: u.volumeProfile?.doubleSided?.maxTokenSharePct ?? 50,
+      },
+    },
   },
 
   // ─── Scheduling ─────────────────────────

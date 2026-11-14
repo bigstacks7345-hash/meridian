@@ -81,7 +81,7 @@ const SECTIONS = [
   {
     id: "strategy", title: "📐 Strategy", desc: "Position shape & bin range",
     settings: [
-      { k: "strategy", path: ["strategy", "strategy"], type: "enum", options: ["spot", "curve", "bid_ask"], label: "shape" },
+      { k: "strategy", path: ["strategy", "strategy"], type: "enum", options: ["spot", "curve", "bid_ask", "volume_profile", "double_sided_volume_profile"], label: "shape" },
       { k: "minBinsBelow", path: ["strategy", "minBinsBelow"], type: "int", min: MIN_SAFE_BINS_BELOW, max: 200, unit: "bins" },
       { k: "maxBinsBelow", path: ["strategy", "maxBinsBelow"], type: "int", min: MIN_SAFE_BINS_BELOW, max: 200, unit: "bins" },
       { k: "defaultBinsBelow", path: ["strategy", "defaultBinsBelow"], type: "int", min: MIN_SAFE_BINS_BELOW, max: 200, unit: "bins" },
@@ -287,7 +287,7 @@ function sectionMenu(section) {
   const explainers = {
     strategy:
       "Range: bins below the active bin scale with pool volatility, clamped to min–max (bins above = 0). " +
-      "Shape: spot = flat, curve = bell, bid_ask = concentrated at the center. Applied per entry, no restart.",
+      "Shape: spot = flat, curve = most SOL near price, bid_ask = most SOL at the far end of the range, volume_profile = SOL follows the volume-profile bars, double_sided_volume_profile = SOL below + token above, range set by the volume clusters. Applied per entry, no restart.",
     rpc: "Endpoints live in .env — edit, then ♻️ Restart.",
   };
   return {
