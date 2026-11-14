@@ -20,9 +20,10 @@ import {
 } from "../state.js";
 import { recordPerformance } from "../performance.js";
 import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
-import { normalizeMint } from "./wallet.js";
+import { normalizeMint, swapToken } from "./wallet.js";
 import { appendDecision } from "../decision-log.js";
 import { computePositions, fetchDlmmPnlForPool } from "./pnl.js";
+import { VOLUME_PROFILE_DEFAULTS, fetchCandles, buildVolumeProfileDistribution, buildDoubleSidedVolumeProfile } from "./volume-profile.js";
 
 // ─── Lazy SDK loader ───────────────────────────────────────────
 // @meteora-ag/dlmm → @coral-xyz/anchor uses CJS directory imports
@@ -297,9 +298,15 @@ export async function deployPosition({
     bid_ask: StrategyType.BidAsk,
   };
 
-  const strategyType = strategyMap[activeStrategy];
+  // volume_profile = custom per-bin weights from recent volume; falls back to a preset if it can't shape.
+  // double_sided_volume_profile = SOL below price, token above, range picked from the volume clusters.
+  const wantsVolumeProfile = activeStrategy === "volume_profile";
+  const wantsDoubleSided = activeStrategy === "double_sided_volume_profile";
+  const fallbackStrategy = config.strategy.volumeProfile?.fallback ?? "bid_ask";
+  let effectiveStrategy = wantsVolumeProfile || wantsDoubleSided ? fallbackStrategy : activeStrategy;
+  const strategyType = strategyMap[effectiveStrategy];
   if (strategyType === undefined) {
-    throw new Error(`Invalid strategy: ${activeStrategy}. Use spot, curve, or bid_ask.`);
+    throw new Error(`Invalid strategy: ${effectiveStrategy}. Use spot, curve, bid_ask, volume_profile, or double_sided_volume_profile.`);
   }
 
   // Calculate amounts
@@ -308,8 +315,9 @@ export async function deployPosition({
     amount_y == null && amount_sol == null
       ? computeDeployAmount((await getWalletBalances()).sol)
       : 0;
-  const finalAmountY = Number(amount_y ?? amount_sol ?? fallbackAmountY);
-  const finalAmountX = Number(amount_x ?? 0);
+  let finalAmountY = Number(amount_y ?? amount_sol ?? fallbackAmountY);
+  let finalAmountX = Number(amount_x ?? 0);
+  const budgetSol = finalAmountY;
   if (!Number.isFinite(finalAmountY) || !Number.isFinite(finalAmountX) || finalAmountY < 0 || finalAmountX < 0) {
     throw new Error("Invalid deploy amount: amount_x and amount_y must be valid non-negative numbers.");
   }
@@ -319,7 +327,7 @@ export async function deployPosition({
   if (finalAmountY <= 0) {
     throw new Error("Invalid deploy amount: provide a positive amount_y/amount_sol.");
   }
-  const isSingleSidedSol = finalAmountX <= 0 && finalAmountY > 0;
+  let isSingleSidedSol = finalAmountX <= 0 && finalAmountY > 0;
   if (isSingleSidedSol && (Number(bins_above ?? 0) > 0 || Number(upside_pct ?? 0) > 0)) {
     throw new Error(
       "Single-side SOL deploy cannot use bins_above or upside_pct. Use amount_y with bins_below only; the upper bin is the SDK active bin.",
@@ -340,11 +348,77 @@ export async function deployPosition({
     throw new Error("Invalid bin range: bins_below and bins_above must be whole-bin integers.");
   }
   const minBinsBelow = Math.max(MIN_SAFE_BINS_BELOW, Number(config.strategy.minBinsBelow ?? MIN_SAFE_BINS_BELOW));
-  const totalBins = activeBinsBelow + activeBinsAbove;
+  let totalBins = activeBinsBelow + activeBinsAbove;
   if (totalBins < minBinsBelow) {
     throw new Error(
       `Invalid deploy range: total bins ${totalBins} is below minimum ${minBinsBelow}. Refusing 1-bin/tiny-range deploy.`,
     );
+  }
+
+  // ── Volume-profile shape (≤69 bins only: the SDK's by-weight deposit caps at one 70-bin position) ──
+  let volumeDistribution = null;
+  let volumePreview = null;
+  let doubleSidedTokenShare = 0;
+  if (wantsDoubleSided) {
+    try {
+      const vp = { ...VOLUME_PROFILE_DEFAULTS, ...(config.strategy.volumeProfile ?? {}) };
+      const candles = await fetchCandles({
+        poolAddress: pool_address,
+        tokenXMint: baseMint,
+        timeframe: vp.timeframe,
+        aggregate: vp.aggregate,
+        limit: vp.lookbackCandles,
+      });
+      const poolPrice = Number(pool.fromPricePerLamport(Number(activeBin.price)));
+      const plan = buildDoubleSidedVolumeProfile(candles, {
+        activeBinId: activeBin.binId,
+        activePrice: poolPrice,
+        binStep: actualBinStep,
+        options: { ...vp, ...(vp.doubleSided ?? {}), minTotalBins: minBinsBelow },
+      });
+      if (plan.binsBelow + plan.binsAbove < minBinsBelow) throw new Error(`auto range is only ${plan.binsBelow + plan.binsAbove} bins`);
+      activeBinsBelow = plan.binsBelow;
+      activeBinsAbove = plan.binsAbove;
+      totalBins = activeBinsBelow + activeBinsAbove;
+      isSingleSidedSol = false;
+      doubleSidedTokenShare = plan.tokenShare;
+      volumeDistribution = plan.distribution;
+      volumePreview = plan.preview;
+      effectiveStrategy = "double_sided_volume_profile";
+      log("deploy", `Double-sided volume profile: -${plan.preview.range_pct.below}% / +${plan.preview.range_pct.above}%, ${plan.preview.token_share_pct}% of SOL → token\n${plan.preview.bars}`);
+    } catch (error) {
+      log("deploy", `Double-sided volume profile unavailable (${error.message}) — falling back to single-sided ${fallbackStrategy}`);
+    }
+  }
+  if (wantsVolumeProfile) {
+    const shapeMinBin = activeBin.binId - activeBinsBelow;
+    const shapeMaxBin = isSingleSidedSol ? activeBin.binId : activeBin.binId + activeBinsAbove;
+    try {
+      if (totalBins > 69) throw new Error(`range is ${totalBins} bins; volume_profile supports up to 69`);
+      const vp = { ...VOLUME_PROFILE_DEFAULTS, ...(config.strategy.volumeProfile ?? {}) };
+      const candles = await fetchCandles({
+        poolAddress: pool_address,
+        tokenXMint: baseMint,
+        timeframe: vp.timeframe,
+        aggregate: vp.aggregate,
+        limit: vp.lookbackCandles,
+      });
+      const poolPrice = Number(pool.fromPricePerLamport(Number(activeBin.price)));
+      const shaped = buildVolumeProfileDistribution(candles, {
+        activeBinId: activeBin.binId,
+        activePrice: poolPrice,
+        binStep: actualBinStep,
+        minBinId: shapeMinBin,
+        maxBinId: shapeMaxBin,
+        options: vp,
+      });
+      volumeDistribution = shaped.distribution;
+      volumePreview = shaped.preview;
+      effectiveStrategy = "volume_profile";
+      log("deploy", `Volume profile: ${shaped.preview.bins} bins, ${shaped.preview.in_range_volume_pct}% of volume in range\n${shaped.preview.bars}`);
+    } catch (error) {
+      log("deploy", `Volume profile unavailable (${error.message}) — falling back to ${fallbackStrategy}`);
+    }
   }
 
   if (transactionsAreDryRun()) {
@@ -352,7 +426,9 @@ export async function deployPosition({
       dry_run: true,
       would_deploy: {
         pool_address,
-        strategy: activeStrategy,
+        strategy: effectiveStrategy,
+        volume_profile: volumePreview,
+        would_swap_sol_to_token: doubleSidedTokenShare > 0 ? Number((budgetSol * doubleSidedTokenShare).toFixed(4)) : 0,
         bins_below: activeBinsBelow,
         bins_above: activeBinsAbove,
         downside_pct: downside_pct ?? null,
@@ -380,6 +456,23 @@ export async function deployPosition({
 
   await assertRangeDoesNotRequireBinArrayInitialization(pool, minBinId, maxBinId);
 
+  // Double-sided: swap the token side's share of SOL now, right before depositing.
+  let swappedXRaw = null;
+  if (doubleSidedTokenShare > 0) {
+    const solToSwap = Number((budgetSol * doubleSidedTokenShare).toFixed(9));
+    await before_submit?.();
+    const swap = await swapToken({ input_mint: config.tokens.SOL, output_mint: baseMint, amount: solToSwap });
+    if (!swap?.success || !swap.amount_out) {
+      return { success: false, error: `Double-sided entry aborted: SOL→token swap failed (${swap?.error ?? "no amount_out"})` };
+    }
+    swappedXRaw = String(swap.amount_out);
+    const mintInfo = await getConnection().getParsedAccountInfo(new PublicKey(pool.lbPair.tokenXMint));
+    const xDecimals = mintInfo.value?.data?.parsed?.info?.decimals ?? 9;
+    finalAmountX = Number(swappedXRaw) / Math.pow(10, xDecimals);
+    finalAmountY = Number((budgetSol - solToSwap).toFixed(9));
+    log("deploy", `Swapped ${solToSwap} SOL → ${finalAmountX} token for the upper side (tx ${swap.tx})`);
+  }
+
   const minPrice = Number(getPriceOfBinByBinId(minBinId, actualBinStep).toString());
   const maxPrice = Number(getPriceOfBinByBinId(maxBinId, actualBinStep).toString());
   const downsideCoveragePct = activePrice > 0 ? ((activePrice - minPrice) / activePrice) * 100 : null;
@@ -398,6 +491,7 @@ export async function deployPosition({
     const decimals = mintInfo.value?.data?.parsed?.info?.decimals ?? 9;
     totalXLamports = new BN(Math.floor(finalAmountX * Math.pow(10, decimals)));
   }
+  if (swappedXRaw) totalXLamports = new BN(swappedXRaw);
 
 
 
@@ -406,12 +500,12 @@ export async function deployPosition({
   await on_prepared?.(newPosition.publicKey.toString());
 
   log("deploy", `Pool: ${pool_address}`);
-  log("deploy", `Strategy: ${activeStrategy}, Bins: ${minBinId} to ${maxBinId} (${totalBins} bins${isWideRange ? " — WIDE RANGE" : ""})`);
+  log("deploy", `Strategy: ${effectiveStrategy}, Bins: ${minBinId} to ${maxBinId} (${totalBins} bins${isWideRange ? " — WIDE RANGE" : ""})`);
   log("deploy", `Amount: ${finalAmountX} X, ${finalAmountY} Y`);
   log("deploy", `Position: ${newPosition.publicKey.toString()}`);
 
+  const txHashes = [];
   try {
-    const txHashes = [];
 
     if (isWideRange) {
       // ── Wide Range Path (>69 bins) ─────────────────────────────────
@@ -452,6 +546,25 @@ export async function deployPosition({
         txHashes.push(txHash);
         log("deploy", `Add liquidity tx ${i + 1}/${addTxArray.length}: ${txHash}`);
       }
+    } else if (volumeDistribution) {
+      // ── Volume-profile Path (≤69 bins, custom per-bin weights) ──────
+      const shapedTxs = await pool.initializePositionAndAddLiquidityByWeight({
+        positionPubKey: newPosition.publicKey,
+        user: wallet.publicKey,
+        totalXAmount: totalXLamports,
+        totalYAmount: totalYLamports,
+        xYAmountDistribution: volumeDistribution,
+        slippage: 1, // SDK expects percent
+      });
+      const shapedTxArray = Array.isArray(shapedTxs) ? shapedTxs : [shapedTxs];
+      for (let i = 0; i < shapedTxArray.length; i++) {
+        // The first tx carries initializePosition, which the new position keypair must sign.
+        const signers = i === 0 ? [wallet, newPosition] : [wallet];
+        await before_submit?.();
+        const txHash = await sendAndConfirmTransaction(getConnection(), shapedTxArray[i], signers);
+        txHashes.push(txHash);
+        log("deploy", `Volume-profile tx ${i + 1}/${shapedTxArray.length}: ${txHash}`);
+      }
     } else {
       // ── Standard Path (≤69 bins) ─────────────────────────────────
       const tx = await pool.initializePositionAndAddLiquidityByStrategy({
@@ -475,13 +588,13 @@ export async function deployPosition({
       position: newPosition.publicKey.toString(),
       pool: pool_address,
       pool_name,
-      strategy: activeStrategy,
+      strategy: effectiveStrategy,
       bin_range: { min: minBinId, max: maxBinId, bins_below: activeBinsBelow, bins_above: activeBinsAbove },
       bin_step,
       volatility: normalizedVolatility,
       fee_tvl_ratio,
       organic_score,
-      amount_sol: finalAmountY,
+      amount_sol: budgetSol,
       amount_x: finalAmountX,
       active_bin: activeBin.binId,
       initial_value_usd,
@@ -498,7 +611,7 @@ export async function deployPosition({
       pool: pool_address,
       pool_name,
       position: newPosition.publicKey.toString(),
-      summary: `Deployed ${finalAmountY} SOL with ${activeStrategy}`,
+      summary: `Deployed ${finalAmountY} SOL with ${effectiveStrategy}`,
       reason: `Chosen range ${minBinId}→${maxBinId} around active bin ${activeBin.binId}`,
       risks: [
         normalizedVolatility != null ? `volatility ${normalizedVolatility}` : null,
@@ -506,7 +619,7 @@ export async function deployPosition({
       ].filter(Boolean),
       metrics: {
         amount_sol: finalAmountY,
-        strategy: activeStrategy,
+        strategy: effectiveStrategy,
         active_bin: activeBin.binId,
         min_bin: minBinId,
         max_bin: maxBinId,
@@ -530,7 +643,7 @@ export async function deployPosition({
       },
       bin_step: actualBinStep,
       base_fee: actualBaseFee,
-      strategy: activeStrategy,
+      strategy: effectiveStrategy,
       wide_range: isWideRange,
       amount_x: finalAmountX,
       amount_y: finalAmountY,
@@ -538,6 +651,11 @@ export async function deployPosition({
     };
   } catch (error) {
     log("deploy_error", error.message);
+    if (swappedXRaw && txHashes.length === 0) {
+      log("deploy", "Deposit failed after the SOL→token swap — swapping the token back to SOL");
+      const back = await swapToken({ input_mint: baseMint, output_mint: config.tokens.SOL, amount: finalAmountX }).catch((e) => ({ error: e.message }));
+      if (!back?.success) log("deploy_error", `Swap-back failed (${back?.error}) — ${finalAmountX} token left in the wallet`);
+    }
     return { success: false, error: error.message };
   }
 }

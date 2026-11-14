@@ -86,11 +86,11 @@ test("range clamps 40% below Supertrend into 65–73% below entry", () => {
   assert.ok(tooDeep.binsBelow >= 35);
 });
 
-test("size is 0.25 spot plus 0.25 bid/ask, with two positions and a three minute gap", () => {
+test("size is 0.2 spot plus 0.3 bid/ask (40/60 hybrid), with two positions and a three minute gap", () => {
   const sized = positionLegs(rules);
   assert.deepEqual(sized.legs, [
-    { strategy: "spot", amountSol: 0.25, amountToken: 0 },
-    { strategy: "bid_ask", amountSol: 0.25, amountToken: 0 },
+    { strategy: "spot", amountSol: 0.2, amountToken: 0 },
+    { strategy: "bid_ask", amountSol: 0.3, amountToken: 0 },
   ]);
   const snapshot = passingSnapshot(mint);
   const signal = { mint, events: events([{ wallet: wallets[0] }, { wallet: wallets[1] }]) };
@@ -160,7 +160,8 @@ test("shadow replay proposes both legs and trails out without submitting", () =>
   assert.equal(report.submitted, false);
   assert.equal(report.profile, "tradingview-vpvr");
   assert.equal(report.pocValid, true);
-  assert.equal(report.legs[0].amountSol, 0.25);
+  assert.equal(report.legs[0].amountSol, 0.2);
+  assert.equal(report.legs[1].amountSol, 0.3);
   assert.equal(report.legs[1].strategy, "bid_ask");
   assert.deepEqual(report.trace.map(step => step.exit), [null, null, null, null, "trail"]);
 });
