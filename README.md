@@ -37,15 +37,17 @@ Supported infrastructure overrides:
 | `PNL_SOURCE` | `meteora` (default) or `rpc` |
 | `PNL_RPC_URL` | Optional on-chain PnL engine endpoint |
 | `JUPITER_API_KEY` | Jupiter price and swap access. Required for authenticated calls; the process has no built-in key |
-| `JUPITER_REFERRAL_ACCOUNT`, `JUPITER_REFERRAL_FEE_BPS` | Optional override for the live-swap referral |
+| `JUPITER_REFERRAL_ACCOUNT`, `JUPITER_REFERRAL_FEE_BPS` | Optional Jupiter referral. The fee defaults to 0 bps. Ultra only accepts 50–255 if you set one |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | Optional outbound notifications |
 | `TELEGRAM_ALLOWED_USER_IDS` | Enables the in-chat admin console. Leave unset to keep it off |
 
-Balances use standard RPC, including SPL Token and Token-2022. PnL defaults to Meteora portfolio and position APIs, with an on-chain fallback. Jupiter supplies prices, token data, and swaps. Live swaps attach the built-in referral unless those referral variables override it.
+Balances use standard RPC, including SPL Token and Token-2022. PnL defaults to Meteora portfolio and position APIs, with an on-chain fallback. Jupiter supplies prices, token data, and swaps. The Jupiter referral fee defaults to 0 bps. A live swap adds a referral only when `JUPITER_REFERRAL_FEE_BPS` is set between 50 and 255.
 
 This build forces shadow mode and `DRY_RUN=true`. `npm run safety` stays at `"willSubmit": false`. Telegram notifications can still be sent. The admin console does not start, so it cannot arm trading, import a key, or display a key.
 
-The owner parameters live in `ownerStrategy` inside [user-config.example.json](user-config.example.json). The volume profile is a TradingView visible-range VPVR equivalent: 24 rows over the high/low of the shorter of the prior 24 hours and the token's whole life. A token younger than 24 hours must include its launch minute or the entry is skipped. Volume is split across each 1-minute bar's range, and TradingView's one-row value-area rule is used. It is computed once at a shadow entry and locked. `candleProvider` defaults to `none` and fails closed. `gmgn` paginates `/v1/market/token_kline`. Its `volume` field is USD notional and `amount` is token units. OHLC from that route is in USD, so quote prices divide each token candle by the wrapped-SOL candle at the same timestamp. The profile, indicators, range, and exits use that quote price. Dollar checks keep the USD volume. `birdeye` is a stub for `/defi/v3/ohlcv`.
+The owner parameters live in `ownerStrategy` inside [user-config.example.json](user-config.example.json). Extra screens sit on top of the existing trigger and GMGN filters: 30-minute fee/TVL at least 0.6%, a fee-turnover check on small pools, a sticky rug block, keep-the-biggest pool, and a stop-loss mint cooldown. Each one fails closed when its input is missing. An emergency take-profit closes at +10% when price is at or below the midpoint of the lower range. A breakeven lock arms after +5% and exits at 0%. An out-of-range move of more than 5 bins can be repositioned at most twice in shadow; that path does not send unless `oorReposition.execute` is true and the live gates are open. The Jupiter referral fee defaults to 0 bps.
+
+The volume profile is a TradingView visible-range VPVR equivalent: 24 rows over the high/low of the shorter of the prior 24 hours and the token's whole life. A token younger than 24 hours must include its launch minute or the entry is skipped. Volume is split across each 1-minute bar's range, and TradingView's one-row value-area rule is used. It is computed once at a shadow entry and locked. `candleProvider` defaults to `none` and fails closed. `gmgn` paginates `/v1/market/token_kline`. Its `volume` field is USD notional and `amount` is token units. OHLC from that route is in USD, so quote prices divide each token candle by the wrapped-SOL candle at the same timestamp. The profile, indicators, range, and exits use that quote price. Dollar checks keep the USD volume. `birdeye` is a stub for `/defi/v3/ohlcv`.
 
 `npm run shadow-replay` runs one offline scenario and does not sign or broadcast.
 

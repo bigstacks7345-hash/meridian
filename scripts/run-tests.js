@@ -47,6 +47,7 @@ const steps = [
     "test/entry-guards.test.js",
     "test/liquidity-sim.test.js",
     "test/liquidity-live.test.js",
+    "test/warlock-screens.test.js",
   ]],
 ];
 

@@ -1,6 +1,6 @@
 // Shadow proposals only. This module never imports a signer or an RPC client.
 
-import { canOpen, entryRange, evaluateEntry, evaluateExit, lockPoc, positionLegs, resolveQuotePnl, watchedConvergence } from "./rules.js";
+import { canOpen, entryRange, evaluateEntry, evaluateExit, evaluateOorReposition, lockPoc, positionLegs, resolveQuotePnl, watchedConvergence } from "./rules.js";
 
 export function planShadowEntry({ signal, snapshot, book = [], rules, now }) {
   const fabriq = signal?.source === "fabriq";
@@ -62,13 +62,25 @@ export function stepShadowPosition(position, tick, rules) {
   if (!resolved.ok) return { position, exit: null, held: resolved.reason };
   const pnl = resolved.pnlPct;
   const peak = Math.max(position.peakPnlPct ?? 0, pnl);
-  const next = { ...position, peakPnlPct: peak, pnlPct: pnl };
+  const lock = rules.breakevenLock || {};
+  const breakevenArmed = position.breakevenArmed === true || (lock.enabled !== false && peak >= (Number(lock.armPnlPct) || 5));
+  const next = { ...position, peakPnlPct: peak, pnlPct: pnl, breakevenArmed };
   const exit = evaluateExit(next, tick, rules);
-  if (!exit.action) return { position: next, exit: null };
-  return {
-    position: { ...next, status: "closed", closedAt: tick.at ?? null, closeReason: exit.reason, closeRule: exit.rule },
-    exit,
-  };
+  if (exit.action) {
+    return {
+      position: { ...next, status: "closed", closedAt: tick.at ?? null, closeReason: exit.reason, closeRule: exit.rule },
+      exit,
+    };
+  }
+  const oor = evaluateOorReposition(next, tick, rules, pnl);
+  if (oor.action === "reposition") {
+    return {
+      position: { ...next, ...oor.next, lastOor: { ...oor, simulated: true, executed: false } },
+      exit: null,
+      reposition: oor,
+    };
+  }
+  return { position: next, exit: null, reposition: oor.action ? oor : null };
 }
 
 export function stepShadowBook(book, tick, rules) {
