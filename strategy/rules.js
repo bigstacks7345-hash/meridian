@@ -114,7 +114,98 @@ export function evaluateEntry(snapshot, rules) {
   display.poolDepth = depth;
   if (!depth.ok && depth.reason) reasons.push(depth.reason);
 
+  const screens = extraEntryScreens(snapshot, rules);
+  display.screens = screens.display;
+  reasons.push(...screens.reasons);
+
   return { pass: reasons.length === 0, reasons, display };
+}
+
+export function extraEntryScreens(snapshot, rules = {}) {
+  const reasons = [];
+  const display = {};
+  const now = num(snapshot?.checkedAt ?? snapshot?.asOf);
+  reasons.push(...feeTvlScreen(snapshot, rules, display));
+  reasons.push(...feeTurnoverScreen(snapshot, rules, display));
+  reasons.push(...stickyRugScreen(snapshot, rules, now, display));
+  reasons.push(...keepBiggestScreen(snapshot, rules, display));
+  reasons.push(...slBlacklistScreen(snapshot, rules, now, display));
+  return { reasons: reasons.filter(Boolean), display };
+}
+
+function feeTvlScreen(snapshot, rules, display) {
+  const screen = rules.feeTvl30m || {};
+  if (screen.enabled === false) return [];
+  const minPct = Number.isFinite(Number(screen.minPct)) ? Number(screen.minPct) : 0.6;
+  const value = presentNumber(snapshot?.feeTvl30mPct);
+  display.feeTvl30m = { minPct, feeTvl30mPct: value };
+  if (value == null) return ["30m fee/TVL unavailable"];
+  if (value < minPct) return [`30m fee/TVL ${value}% below ${minPct}%`];
+  return [];
+}
+
+function feeTurnoverScreen(snapshot, rules, display) {
+  const screen = rules.feeTurnover || {};
+  if (screen.enabled === false) return [];
+  const maxPct = Number.isFinite(Number(screen.maxFeeTvl24hPct)) ? Number(screen.maxFeeTvl24hPct) : 60;
+  const maxTvl = Number.isFinite(Number(screen.maxTvlUsd)) ? Number(screen.maxTvlUsd) : 25_000;
+  const tvl = presentNumber(snapshot?.liquidityUsd);
+  const ratio = presentNumber(snapshot?.feeTvl24hPct);
+  display.feeTurnover = { maxFeeTvl24hPct: maxPct, maxTvlUsd: maxTvl, liquidityUsd: tvl, feeTvl24hPct: ratio };
+  if (tvl == null) return ["fee turnover TVL unavailable"];
+  if (tvl >= maxTvl) return [];
+  if (ratio == null) return ["24h fee/TVL unavailable"];
+  if (ratio > maxPct) return [`fee turnover: 24h fee/TVL ${ratio}% above ${maxPct}% on ${tvl} liquidity`];
+  return [];
+}
+
+function stickyRugScreen(snapshot, rules, now, display) {
+  const screen = rules.stickyRug || {};
+  if (screen.enabled === false) return [];
+  const ttl = Number.isFinite(Number(screen.ttlMs)) ? Number(screen.ttlMs) : 7 * 24 * 60 * 60 * 1000;
+  const risky = snapshot?.rugRisky;
+  const flaggedAt = snapshot?.rugFlaggedAt;
+  display.stickyRug = { ttlMs: ttl, rugRisky: risky === undefined ? null : risky, rugFlaggedAt: flaggedAt ?? null };
+  if (risky === true) return ["sticky rug: mint is flagged risky"];
+  if (flaggedAt === undefined && risky === undefined) return ["rug check unavailable"];
+  if (typeof flaggedAt === "number") {
+    if (now == null) return ["rug check clock unavailable"];
+    if (now - flaggedAt < ttl) return ["sticky rug: mint stays blocked after an earlier flag"];
+  }
+  return [];
+}
+
+function keepBiggestScreen(snapshot, rules, display) {
+  const screen = rules.keepBiggest || {};
+  if (screen.enabled === false) return [];
+  const floor = Number.isFinite(Number(screen.minTwinLiquidityUsd)) ? Number(screen.minTwinLiquidityUsd) : 10_000;
+  if (!Array.isArray(snapshot?.pools)) return ["pool siblings unavailable"];
+  const mine = presentNumber(snapshot.liquidityUsd);
+  if (mine == null) return ["pool liquidity unavailable for keep-biggest"];
+  const contenders = snapshot.pools
+    .map(pool => presentNumber(pool?.liquidityUsd))
+    .filter(value => value != null && value >= floor);
+  const biggest = contenders.reduce((max, value) => Math.max(max, value), 0);
+  display.keepBiggest = { minTwinLiquidityUsd: floor, liquidityUsd: mine, biggest };
+  if (mine < floor) {
+    if (contenders.length > 0) return [`keep biggest: pool liquidity ${mine} is below ${floor} and a larger pool exists`];
+    return [];
+  }
+  if (biggest > mine) return [`keep biggest: pool liquidity ${mine} is below ${biggest}`];
+  return [];
+}
+
+function slBlacklistScreen(snapshot, rules, now, display) {
+  const screen = rules.slMintBlacklist || {};
+  if (screen.enabled === false) return [];
+  const cooldown = Number.isFinite(Number(screen.cooldownMs)) ? Number(screen.cooldownMs) : 30 * 60 * 1000;
+  const closedAt = snapshot?.slClosedAt;
+  display.slMintBlacklist = { cooldownMs: cooldown, slClosedAt: closedAt ?? null };
+  if (closedAt === undefined) return ["stop-loss history unavailable"];
+  if (closedAt == null) return [];
+  if (now == null) return ["stop-loss clock unavailable"];
+  if (now - Number(closedAt) < cooldown) return ["stop-loss blacklist: mint is in cooldown"];
+  return [];
 }
 
 export function crashDrawdown(snapshot, rules = {}) {
@@ -316,13 +407,36 @@ export function resolveQuotePnl(position, tick) {
   return { ok: true, pnlPct: Number(tick.pnlPct) };
 }
 
+export function lowerRangeMidpoint(position) {
+  const entry = num(position?.entryQuotePrice);
+  const lower = num(position?.range?.lower ?? position?.lowerPrice);
+  if (entry == null || lower == null || entry <= 0 || lower <= 0 || lower >= entry) return null;
+  return (entry + lower) / 2;
+}
+
 export function evaluateExit(position, tick, rules) {
   const resolved = resolveQuotePnl(position, tick);
-  if (!resolved.ok) return { action: null, reason: resolved.reason };
-  const pnl = resolved.pnlPct;
+  if (!resolved.ok && num(tick?.positionPnlPct) == null) return { action: null, reason: resolved.reason };
+  const pnl = num(tick?.positionPnlPct) ?? resolved.pnlPct;
   const peak = num(position?.peakPnlPct);
+  const lock = rules.breakevenLock || {};
+  const armed = lock.enabled !== false && peak != null && peak >= (Number(lock.armPnlPct) || 5);
+  const lockExit = Number.isFinite(Number(lock.exitPnlPct)) ? Number(lock.exitPnlPct) : 0;
+  if (armed && pnl <= lockExit) {
+    return { action: "CLOSE", rule: "breakeven-lock", reason: `breakeven lock after peak ${peak}% at ${pnl}%` };
+  }
   if (pnl <= rules.stopLossPct) return { action: "CLOSE", rule: "stop", reason: `stop loss ${pnl}%` };
+  const emergency = rules.emergencyTakeProfit || {};
+  if (emergency.enabled !== false && pnl >= (Number(emergency.minPnlPct) || 10)) {
+    const mid = lowerRangeMidpoint(position);
+    const price = num(tick?.quotePrice);
+    if (mid != null && price != null && price <= mid) {
+      return { action: "CLOSE", rule: "emergency-take-profit", reason: `emergency take profit ${pnl}% at or below range midpoint ${mid}` };
+    }
+  }
   if (pnl >= rules.hardTakeProfitPct) return { action: "CLOSE", rule: "hard-take-profit", reason: `hard take profit ${pnl}%` };
+  const oor = oorTakeProfit(position, tick, rules, pnl);
+  if (oor) return oor;
   if (peak != null && peak >= rules.trailActivatePct && pnl <= peak - rules.trailDistancePct) {
     return { action: "CLOSE", rule: "trail", reason: `trail peak ${peak}% current ${pnl}%` };
   }
@@ -331,6 +445,52 @@ export function evaluateExit(position, tick, rules) {
     return { action: "CLOSE", rule: "poc", reason: `5m close ${close} below locked POC ${position.pocPrice}` };
   }
   return { action: null, reason: "hold" };
+}
+
+function oorTakeProfit(position, tick, rules, pnl) {
+  const cfg = rules.oorReposition || {};
+  if (cfg.enabled === false) return null;
+  const active = num(tick?.activeBin ?? position?.activeBin);
+  const upper = num(tick?.upperBin ?? position?.upperBin);
+  if (active == null || upper == null) return null;
+  const above = active - upper;
+  const bins = Number.isFinite(Number(cfg.binsAbove)) ? Number(cfg.binsAbove) : 5;
+  const take = Number.isFinite(Number(cfg.takeProfitPct)) ? Number(cfg.takeProfitPct) : 0.5;
+  if (above > bins && pnl >= take) {
+    return { action: "CLOSE", rule: "oor-take-profit", reason: `oor take profit ${pnl}% after ${above} bins above the range` };
+  }
+  return null;
+}
+
+export function evaluateOorReposition(position, tick, rules, pnl) {
+  const cfg = rules.oorReposition || {};
+  if (cfg.enabled === false) return { action: null, simulated: true, executed: false };
+  const active = num(tick?.activeBin ?? position?.activeBin);
+  const upper = num(tick?.upperBin ?? position?.upperBin);
+  const lower = num(tick?.lowerBin ?? position?.lowerBin);
+  if (active == null || upper == null || lower == null || !(upper > lower)) {
+    return { action: null, simulated: true, executed: false, reason: "oor bins unavailable" };
+  }
+  const above = active - upper;
+  const bins = Number.isFinite(Number(cfg.binsAbove)) ? Number(cfg.binsAbove) : 5;
+  if (!(above > bins)) return { action: null, simulated: true, executed: false };
+  const floor = Number.isFinite(Number(cfg.floorPnlPct)) ? Number(cfg.floorPnlPct) : -3;
+  if (pnl == null) return { action: null, simulated: true, executed: false, reason: "oor pnl unavailable" };
+  if (pnl < floor) return { action: null, simulated: true, executed: false, reason: `oor reposition skipped: pnl ${pnl}% below ${floor}%` };
+  const count = Number(position?.oorRepositions) || 0;
+  const cap = Number.isFinite(Number(cfg.maxRepositions)) ? Number(cfg.maxRepositions) : 2;
+  if (count >= cap) return { action: null, simulated: true, executed: false, reason: "oor reposition cap reached" };
+  const width = upper - lower;
+  return {
+    action: "reposition",
+    rule: "oor-reposition",
+    reason: `oor reposition ${count + 1} of ${cap} after ${above} bins above the range`,
+    simulated: true,
+    executed: false,
+    binsAbove: above,
+    hybrid: { removeBps: 10000, shrinkMode: 3, legs: ["spot", "bidask"] },
+    next: { upperBin: active, lowerBin: active - width, oorRepositions: count + 1 },
+  };
 }
 
 export function smaDisplay(values, length) {

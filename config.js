@@ -230,7 +230,7 @@ export const config = {
       process.env.JUPITER_REFERRAL_ACCOUNT ??
       "9MzhDUnq3KxecyPzvhguQMMPbooXQ3VAoCMPDnoijwey",
     referralFeeBps: Number(
-      process.env.JUPITER_REFERRAL_FEE_BPS ?? 50,
+      process.env.JUPITER_REFERRAL_FEE_BPS ?? 0,
     ),
   },
 
