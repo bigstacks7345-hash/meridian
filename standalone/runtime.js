@@ -25,7 +25,7 @@ import { startAdmin } from "./telegram-admin.js";
 import { planShadowEntry, stepShadowBook } from "../strategy/shadow.js";
 import { liquidityCloseSummary, simulateLiquidity } from "../strategy/liquidity-management.js";
 import { recordExit, recordLiquidity, recordScreening } from "./decisions.js";
-import { createGmgnGate, createMarketData, createRequestBudget } from "../strategy/market-data.js";
+import { createGmgnGate, createMarketData, createRequestBudget, gmgnFetch } from "../strategy/market-data.js";
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -327,7 +327,7 @@ export function createOwnerMarketData(overrides = {}) {
   if (!ownerGmgn.gate) ownerGmgn.gate = createGmgnGate();
   return createMarketData(rules, {
     apiKey: overrides.apiKey ?? process.env.GMGN_API_KEY ?? "",
-    fetchImpl: overrides.fetchImpl ?? globalThis.fetch,
+    fetchImpl: overrides.fetchImpl ?? gmgnFetch,
     now: overrides.now ?? Date.now,
     sleep: overrides.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms))),
     budget: overrides.budget ?? ownerGmgn.budget,

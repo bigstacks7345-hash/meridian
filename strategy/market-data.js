@@ -1,7 +1,96 @@
 // Candle providers. The default provider does not call the network.
 // GMGN token_kline is paginated backwards. Birdeye is a configurable stub.
 
+import https from "node:https";
+import { randomUUID } from "node:crypto";
+import { log as writeLog } from "../logger.js";
 import { continuousSeries } from "./indicators.js";
+
+// GMGN OpenAPI: every request needs a unix-seconds timestamp and a new UUID
+// client_id. A repeated client_id within 20 seconds is rejected as a replay.
+// The official API also rejects IPv6, so the default client uses IPv4 only.
+export const GMGN_IPV4 = { family: 4, keepAlive: true };
+
+let ipv4Agent;
+export function gmgnIpv4Agent() {
+  if (!ipv4Agent) ipv4Agent = new https.Agent(GMGN_IPV4);
+  return ipv4Agent;
+}
+
+export function gmgnRequestInit(apiKey, agent = gmgnIpv4Agent()) {
+  return {
+    headers: apiKey ? { "X-APIKEY": apiKey } : {},
+    agent,
+    family: GMGN_IPV4.family,
+  };
+}
+
+export function stampGmgnAuth(url, nowMs = Date.now()) {
+  url.searchParams.set("timestamp", String(Math.floor(Number(nowMs) / 1000)));
+  url.searchParams.set("client_id", randomUUID());
+  return url;
+}
+
+function gmgnClient(fetchImpl) {
+  if (typeof fetchImpl === "function" && fetchImpl !== globalThis.fetch) return fetchImpl;
+  return gmgnFetch;
+}
+
+export function gmgnFetch(url, init = {}) {
+  const target = url instanceof URL ? url : new URL(String(url));
+  return new Promise((resolve, reject) => {
+    const req = https.request({
+      protocol: target.protocol,
+      hostname: target.hostname,
+      port: target.port || undefined,
+      path: `${target.pathname}${target.search}`,
+      method: init.method || "GET",
+      headers: init.headers,
+      agent: init.agent ?? gmgnIpv4Agent(),
+      family: 4,
+      servername: target.hostname,
+    }, res => {
+      const chunks = [];
+      res.on("data", chunk => chunks.push(chunk));
+      res.on("end", () => {
+        const text = Buffer.concat(chunks).toString("utf8");
+        resolve({
+          ok: res.statusCode >= 200 && res.statusCode < 300,
+          status: res.statusCode,
+          headers: {
+            get(name) {
+              const value = res.headers[String(name).toLowerCase()];
+              if (Array.isArray(value)) return value.join(", ");
+              return value ?? null;
+            },
+          },
+          text: async () => text,
+          json: async () => JSON.parse(text),
+        });
+      });
+    });
+    req.on("error", reject);
+    req.end();
+  });
+}
+
+function reportGmgn(logImpl, message) {
+  (logImpl || writeLog)("GMGN", message);
+}
+
+async function gmgnBody(response) {
+  if (typeof response?.json !== "function") return null;
+  try {
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
+function gmgnErrorText(body) {
+  if (!body || typeof body !== "object") return "";
+  return [body.message, body.error].filter(value => typeof value === "string" && value.trim()).join(" ");
+}
 
 export function createMarketData(rules, deps = {}) {
   if (rules?.candleProvider === "fixture") return fixtureMarketData(deps.fixtures || {});
@@ -139,6 +228,7 @@ export async function fetchGmgn1m({
   gate = null,
   cache = null,
   deadline = null,
+  log = null,
 }) {
   if (!(to > from) || (to - from) % 60_000 !== 0) return { ok: false, reason: "1m window is invalid" };
   const cacheKey = `raw:${mint}:${from}:${to}`;
@@ -158,17 +248,17 @@ export async function fetchGmgn1m({
       await sleep(wait);
       if (!budget.take(cost, now())) return { ok: false, reason: "gmgn credit window exhausted" };
     }
-    const url = gmgnKlineUrl(rules, { mint, from: pageFrom, to: cursor });
+    const url = stampGmgnAuth(gmgnKlineUrl(rules, { mint, from: pageFrom, to: cursor }), now());
     let response;
     try {
-      response = await fetchImpl(url, {
-        headers: apiKey ? { "X-APIKEY": apiKey } : {},
-      });
+      response = await gmgnClient(fetchImpl)(url, gmgnRequestInit(apiKey));
     } catch (error) {
       return { ok: false, reason: `gmgn request failed: ${error.message}` };
     }
     if (response.status === 429) {
-      const body = await response.json?.().catch(() => null);
+      const body = await gmgnBody(response);
+      const detail = gmgnErrorText(body);
+      reportGmgn(log, detail ? `status 429 ${detail}` : "status 429");
       const resetAt = parseGmgnResetAt(response, body, now()) ?? now() + (rules.gmgnWindowMs ?? 1000);
       if (gate) gate.pausedUntil = Math.max(gate.pausedUntil, resetAt);
       if (gmgnRetryWithinDeadline(deadline, resetAt) && rateRetries < 3) {
@@ -178,7 +268,13 @@ export async function fetchGmgn1m({
       }
       return { ok: false, reason: "gmgn 429; paused until reset" };
     }
-    if (!response.ok) return { ok: false, reason: `gmgn status ${response.status}` };
+    if (!response.ok) {
+      const body = await gmgnBody(response);
+      const detail = gmgnErrorText(body);
+      const reason = detail ? `gmgn status ${response.status} ${detail}` : `gmgn status ${response.status}`;
+      reportGmgn(log, reason);
+      return { ok: false, reason };
+    }
     const parsed = parseGmgnKlines(await response.json(), rules.gmgnUsdField);
     if (!parsed.ok) return parsed;
     collected.push(...parsed.candles);
@@ -280,7 +376,7 @@ export function parseTokenCreatedAt(body) {
   return { ok: true, createdAt: n < 1e12 ? n * 1000 : n };
 }
 
-export async function fetchTokenCreatedAt({ rules, mint, fetchImpl, sleep = () => Promise.resolve(), now = Date.now, budget, apiKey = "", gate = null, cache = null, deadline = null, rateRetries = 0 }) {
+export async function fetchTokenCreatedAt({ rules, mint, fetchImpl, sleep = () => Promise.resolve(), now = Date.now, budget, apiKey = "", gate = null, cache = null, deadline = null, rateRetries = 0, log = null }) {
   const cacheKey = `created:${mint}`;
   const cached = cache?.get(cacheKey);
   if (cached && now() - cached.at < (rules.candleCacheMs ?? 60_000)) return cached.value;
@@ -292,26 +388,34 @@ export async function fetchTokenCreatedAt({ rules, mint, fetchImpl, sleep = () =
     await sleep(wait);
     if (!budget.take(cost, now())) return { ok: false, reason: "gmgn credit window exhausted" };
   }
-  const url = new URL(rules.gmgnTokenInfoPath, rules.gmgnBaseUrl);
+  const url = stampGmgnAuth(new URL(rules.gmgnTokenInfoPath, rules.gmgnBaseUrl), now());
   url.searchParams.set("chain", rules.gmgnChain);
   url.searchParams.set("address", mint);
   let response;
   try {
-    response = await fetchImpl(url, { headers: apiKey ? { "X-APIKEY": apiKey } : {} });
+    response = await gmgnClient(fetchImpl)(url, gmgnRequestInit(apiKey));
   } catch (error) {
     return { ok: false, reason: `gmgn request failed: ${error.message}` };
   }
   if (response.status === 429) {
-    const body = await response.json?.().catch(() => null);
+    const body = await gmgnBody(response);
+    const detail = gmgnErrorText(body);
+    reportGmgn(log, detail ? `status 429 ${detail}` : "status 429");
     const resetAt = parseGmgnResetAt(response, body, now()) ?? now() + (rules.gmgnWindowMs ?? 1000);
     if (gate) gate.pausedUntil = Math.max(gate.pausedUntil, resetAt);
     if (gmgnRetryWithinDeadline(deadline, resetAt) && rateRetries < 3) {
       await sleep(Math.max(0, resetAt - now()));
-      return fetchTokenCreatedAt({ rules, mint, fetchImpl, sleep, now, budget, apiKey, gate, cache, deadline, rateRetries: rateRetries + 1 });
+      return fetchTokenCreatedAt({ rules, mint, fetchImpl, sleep, now, budget, apiKey, gate, cache, deadline, log, rateRetries: rateRetries + 1 });
     }
     return { ok: false, reason: "gmgn 429; paused until reset" };
   }
-  if (!response.ok) return { ok: false, reason: `gmgn status ${response.status}` };
+  if (!response.ok) {
+    const body = await gmgnBody(response);
+    const detail = gmgnErrorText(body);
+    const reason = detail ? `gmgn status ${response.status} ${detail}` : `gmgn status ${response.status}`;
+    reportGmgn(log, reason);
+    return { ok: false, reason };
+  }
   const parsed = parseTokenCreatedAt(await response.json());
   if (parsed.ok) cache?.set(cacheKey, { at: now(), value: parsed });
   return parsed;

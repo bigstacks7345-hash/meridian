@@ -40,6 +40,7 @@ const steps = [
     "test/vpvr.test.js",
     "test/owner-strategy.test.js",
     "test/runtime-market.test.js",
+    "test/gmgn-auth.test.js",
     "test/runtime-signal.test.js",
     "test/fabriq.test.js",
     "test/decisions.test.js",
