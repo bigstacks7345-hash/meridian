@@ -70,15 +70,23 @@ export function recordFabriqAlerts(store, alerts, now = Date.now()) {
   return added;
 }
 
-// A Fabriq alert is its own signal. An active pursuit is refreshed in place.
+// Fabriq HOT posts and GMGN trending hits are external alerts: each opens its
+// own signal instead of counting toward wallet convergence.
+export const EXTERNAL_SOURCES = ["fabriq", "gmgn"];
+export function isExternalSignal(signal) {
+  return EXTERNAL_SOURCES.includes(signal?.source);
+}
+
+// An external alert is its own signal. An active pursuit is refreshed in place.
 // A finished signal stays finished until its cooldown ends.
-export function acceptFabriqAlert(store, alert, now = Date.now()) {
-  if (!alert?.mint) return { action: "ignore", signal: null };
+export function acceptExternalAlert(store, alert, now = Date.now()) {
+  if (!alert?.mint || !EXTERNAL_SOURCES.includes(alert.source)) return { action: "ignore", signal: null };
   if (!store.data.signals) store.data.signals = {};
+  const field = `${alert.source}Alert`;
   const existing = store.data.signals[alert.mint];
   if (existing && !existing.done) {
     existing.lastAlertAt = now;
-    existing.fabriqAlert = alert;
+    existing[field] = alert;
     if (alert.pool) existing.pool = alert.pool;
     store.save();
     return { action: "refresh", signal: existing };
@@ -86,19 +94,23 @@ export function acceptFabriqAlert(store, alert, now = Date.now()) {
   if (existing?.done && now < (existing.cooldownUntil || 0)) return { action: "cooldown", signal: existing };
   const signal = {
     mint: alert.mint,
-    source: "fabriq",
+    source: alert.source,
     pool: alert.pool || null,
     createdAt: now,
     deadline: null,
     lastAlertAt: now,
     nextCheck: now,
-    fabriqAlert: alert,
+    [field]: alert,
     events: [],
     done: false,
   };
   store.data.signals[alert.mint] = signal;
   store.save();
   return { action: "open", signal };
+}
+
+export function acceptFabriqAlert(store, alert, now = Date.now()) {
+  return acceptExternalAlert(store, alert ? { ...alert, source: "fabriq" } : alert, now);
 }
 export function qualifyingEvents(events, mint, options, now = Date.now()) {
   const latest = new Map();

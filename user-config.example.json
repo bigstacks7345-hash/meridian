@@ -31,6 +31,14 @@
       "staleAfterSec": 1800,
       "maxActive": 3,
       "channel": "fabriqalert"
+    },
+    "gmgnTrending": {
+      "enabled": true,
+      "pollSec": 60,
+      "minVolume5mUsd": 150000,
+      "minMarketCapUsd": 750000,
+      "maxBundlerRate": 0.5,
+      "staleAfterSec": 1800
     }
   },
   "walletReconcileSec": 30,

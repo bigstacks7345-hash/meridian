@@ -39,6 +39,31 @@ function fabriqConfig(raw = {}) {
   };
 }
 
+// GMGN trending watch (ported from the PC script gmgn-alerts/lp_alert.ps1).
+// Defaults match that script: 5m vol >= $150k, mcap >= $750k, bundled < 50%, 60s poll.
+function gmgnTrendingConfig(raw = {}) {
+  const pick = (value, fallback, min = 0) => {
+    const n = Number(value);
+    return Number.isFinite(n) && n > min ? n : fallback;
+  };
+  const bundler = Number(raw.maxBundlerRate);
+  return {
+    enabled: raw.enabled === undefined ? true : Boolean(raw.enabled),
+    pollSec: Math.max(30, pick(raw.pollSec, 60)),
+    minVolume5mUsd: pick(raw.minVolume5mUsd, 150_000),
+    minMarketCapUsd: pick(raw.minMarketCapUsd, 750_000),
+    maxBundlerRate: Number.isFinite(bundler) && bundler > 0 && bundler <= 1 ? bundler : 0.5,
+    limit: Math.min(100, Math.round(pick(raw.limit, 50))),
+    staleAfterSec: pick(raw.staleAfterSec, 1800),
+    refreshMin: pick(raw.refreshMin, 5),
+    rateLimitPauseSec: pick(raw.rateLimitPauseSec, 300),
+    interval: nonEmptyString(raw.interval) || "5m",
+    chain: "sol",
+    baseUrl: "https://openapi.gmgn.ai",
+    path: "/v1/market/rank",
+  };
+}
+
 function numericConfig(value) {
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
@@ -223,6 +248,8 @@ export const config = {
   // Fabriq is watch-only context. It never counts toward wallet convergence.
   externalSignals: {
     fabriq: fabriqConfig(u.externalSignals?.fabriq),
+    // GMGN trending hits open their own signal, like Fabriq. Needs GMGN_API_KEY.
+    gmgnTrending: gmgnTrendingConfig(u.externalSignals?.gmgnTrending),
   },
 
   jupiter: {

@@ -42,6 +42,7 @@ const steps = [
     "test/runtime-market.test.js",
     "test/gmgn-auth.test.js",
     "test/loosen-filters.test.js",
+    "test/gmgn-trending.test.js",
     "test/runtime-signal.test.js",
     "test/fabriq.test.js",
     "test/decisions.test.js",

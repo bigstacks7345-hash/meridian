@@ -9,6 +9,7 @@ The app is the standalone wallet-triggered bot. There is no legacy mode or LLM d
 - `setup.js`: standalone configuration wizard; enables shadow mode.
 - `standalone/runtime.js`: signal pursuit, screening deadlines, entry execution, deterministic management, fast exit polling, heartbeat, process lock.
 - `standalone/fabriq.js`: public Fabriq HOT preview. A fresh alert is its own signal and uses the same entry filters. It is not a watched wallet.
+- `standalone/gmgn-trending.js`: GMGN trending watch (`/v1/market/rank`), ported from the PC `lp_alert.ps1`. A hit opens its own signal like Fabriq and uses the same entry filters.
 - `standalone/monitor.js`: subscriptions, transaction queue, baseline, signature backfill.
 - `standalone/events.js`: DLMM event-CPI decoding and position/exposure checks. SDK is loaded lazily.
 - `standalone/store.js`: persisted deduplication, convergence windows, cooldowns, and recovery attempts.
@@ -27,6 +28,7 @@ The app is the standalone wallet-triggered bot. There is no legacy mode or LLM d
 
 ## Invariants
 
+- A GMGN trending hit (5m volume >= $150k, market cap >= $750k, bundled < 50%, polled every 60s, needs `GMGN_API_KEY`) opens its own signal on the same path as Fabriq: no deadline, every entry filter, shared external pursuit cap, ends after `staleAfterSec` off the list. A 429 pauses it and the kline client through the shared GMGN gate.
 - Wallet entries require fresh convergence of the watched wallets. Do not reintroduce broad scans or expose a bypass through the CLI.
 - A Fabriq HOT alert opens its own signal with no screening deadline. It still has to pass every entry filter. Wallet pursuits take priority when `maxActiveSignals` is full. A Fabriq pursuit ends when no newer alert arrives within `staleAfterSec` (default 1800). The first poll after startup is separate: it ignores posts older than `pollSec * 3` (60 seconds at the default), not `staleAfterSec`.
 - `crashGuard` rejects a quote price more than 60% below the highest 1m high of the last 30 minutes. `poolDepth` rejects when that pool's own 5m volume divided by its liquidity is above 15, and it fails closed when the pool volume is missing. Both apply to wallet and Fabriq entries. The previous-5m volume floor is $30k. Holders are optional unless `holdersRequired` is true. Indicator history accepts 30 one-minute bars, then 5m candles, and fails closed only when there are no candles. A young coin still needs its launch minute for the full-life POC. GMGN token info is cached for 30 minutes and klines for 60 seconds. A Fabriq mint is not rescreened for 10 minutes. A GMGN 429 or credit-window miss is queued until reset.

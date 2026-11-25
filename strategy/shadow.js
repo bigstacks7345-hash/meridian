@@ -3,7 +3,7 @@
 import { canOpen, entryRange, evaluateEntry, evaluateExit, lockPoc, positionLegs, resolveQuotePnl, watchedConvergence } from "./rules.js";
 
 export function planShadowEntry({ signal, snapshot, book = [], rules, now }) {
-  const fabriq = signal?.source === "fabriq";
+  const fabriq = signal?.source === "fabriq" || signal?.source === "gmgn";
   let wallets = [];
   let pools = [];
   if (fabriq) {

@@ -10,7 +10,8 @@ import { config, computeDeployAmount, transactionsAreDryRun } from "../config.js
 import { log } from "../logger.js";
 import { repoPath } from "../repo-root.js";
 import { sendMessage as tgSend, isEnabled as tgEnabled } from "../telegram.js";
-import { MonitorStore, acceptFabriqAlert, dropUnfinishedSignals, finishSignal, recordFabriqAlerts } from "./store.js";
+import { MonitorStore, acceptExternalAlert, acceptFabriqAlert, dropUnfinishedSignals, finishSignal, isExternalSignal, recordFabriqAlerts } from "./store.js";
+import { createGmgnTrendingPoller } from "./gmgn-trending.js";
 import { createFabriqPoller, withFabriqContext } from "./fabriq.js";
 import { WalletMonitor } from "./monitor.js";
 import { screenMint, poolDetail } from "./screening.js";
@@ -36,6 +37,7 @@ let monitor = null;
 let lockPath = null;
 let stopAdmin = null;
 let stopFabriq = () => {};
+let stopGmgnTrending = () => {};
 let notifySink = null;
 let fabriqStartupPending = true;
 let shuttingDown = false;
@@ -67,7 +69,7 @@ function signalOptions() {
 
 function endSignal(signal, reason, now = Date.now()) {
   const options = { ...signalOptions() };
-  if (isFabriq(signal)) {
+  if (isExternal(signal)) {
     const ms = Number(config.ownerStrategy.screenCooldownMs);
     if (Number.isFinite(ms) && ms >= 0) options.cooldownSec = ms / 1000;
   }
@@ -159,6 +161,23 @@ export function ingestFabriqAlerts(alerts, now = Date.now(), options = {}) {
   return added;
 }
 
+// GMGN trending hits (ported from the PC lp_alert.ps1). A token that is still
+// on the list refreshes its active pursuit; a new one opens a signal unless
+// the mint is cooling down after a finished signal.
+export function ingestGmgnAlerts(alerts, now = Date.now()) {
+  if (!store) return [];
+  const opened = [];
+  for (const alert of alerts || []) {
+    if (!alert?.mint || alert.source !== "gmgn") continue;
+    const result = acceptExternalAlert(store, alert, now);
+    if (result.action !== "open") continue;
+    log("gmgn", `TRENDING ${alert.symbol ?? "?"} ${alert.mint.slice(0, 8)} 5m=${alert.volume5mLabel ?? "?"} mc=${Math.round(alert.marketCapUsd ?? 0)} bundled=${Math.round((alert.bundlerRate ?? 0) * 100)}% 5mΔ=${alert.change5mPct != null ? alert.change5mPct.toFixed(1) : "?"}%`);
+    opened.push(alert);
+    enqueueSignal(result.signal);
+  }
+  return opened;
+}
+
 // ─── Signal pursuit ──────────────────────────────────────────────────────────
 
 function globalPursuitLimit() {
@@ -169,28 +188,31 @@ function fabriqPursuitLimit() {
   return Math.max(1, Number(config.externalSignals?.fabriq?.maxActive ?? 3));
 }
 
-function isFabriq(signal) {
-  return signal?.source === "fabriq";
+// Fabriq HOT and GMGN trending signals share one pursuit cap and the same
+// non-wallet path. Wallet signals keep priority over both.
+function isExternal(signal) {
+  return isExternalSignal(signal);
 }
 
 function fabriqInflightCount() {
   let count = 0;
-  for (const mint of signalInflight) if (isFabriq(store?.data?.signals?.[mint])) count++;
+  for (const mint of signalInflight) if (isExternal(store?.data?.signals?.[mint])) count++;
   return count;
 }
 
 function fabriqPursuitCount() {
-  return fabriqInflightCount() + signalQueue.filter(isFabriq).length;
+  return fabriqInflightCount() + signalQueue.filter(isExternal).length;
 }
 
 function sourceLabel(signal) {
-  if (isFabriq(signal)) return "Fabriq HOT";
+  if (signal?.source === "gmgn") return "GMGN trending";
+  if (isExternal(signal)) return "Fabriq HOT";
   const names = (signal?.events || []).map(event => String(event.wallet || "").slice(0, 6)).filter(Boolean);
   return `2 wallets: ${names.join(", ")}`;
 }
 
 function notifyAbout(signal, text) {
-  const body = isFabriq(signal) ? text : withFabriqContext(store, signal.mint, text);
+  const body = isExternal(signal) ? text : withFabriqContext(store, signal.mint, text);
   void notify(body);
 }
 
@@ -198,7 +220,7 @@ function evictOldestFabriq() {
   let oldest = null;
   for (const mint of signalInflight) {
     const signal = store?.data?.signals?.[mint];
-    if (!isFabriq(signal) || signal.done) continue;
+    if (!isExternal(signal) || signal.done) continue;
     const started = signal.startedAt || signal.createdAt || 0;
     if (!oldest || started < (oldest.startedAt || oldest.createdAt || 0)) oldest = signal;
   }
@@ -212,13 +234,13 @@ function evictOldestFabriq() {
 function onSignal(signal) {
   if (!signal || signal.done) return;
   if (signalInflight.has(signal.mint) || signalQueue.some(queued => queued.mint === signal.mint)) return;
-  if (isFabriq(signal) && fabriqPursuitCount() >= fabriqPursuitLimit()) {
+  if (isExternal(signal) && fabriqPursuitCount() >= fabriqPursuitLimit()) {
     endSignal(signal, "fabriq pursuit cap full");
-    log("fabriq", `Dropped ${signal.mint.slice(0, 8)}: fabriq cap ${fabriqPursuitLimit()} is full`);
+    log(signal.source, `Dropped ${signal.mint.slice(0, 8)}: external pursuit cap ${fabriqPursuitLimit()} is full`);
     noteIdle();
     return;
   }
-  if (isFabriq(signal)) signalQueue.push(signal);
+  if (isExternal(signal)) signalQueue.push(signal);
   else {
     signalQueue.unshift(signal);
     while (signalInflight.size >= globalPursuitLimit() && evictOldestFabriq()) { /* wallet signals take the slot */ }
@@ -229,7 +251,7 @@ function onSignal(signal) {
 export function drainSignals() {
   const limit = globalPursuitLimit();
   while (!shuttingDown && signalInflight.size < limit && signalQueue.length) {
-    const walletIndex = signalQueue.findIndex(signal => !isFabriq(signal) && !signal.done);
+    const walletIndex = signalQueue.findIndex(signal => !isExternal(signal) && !signal.done);
     let index = walletIndex;
     if (index < 0) {
       if (fabriqInflightCount() >= fabriqPursuitLimit()) break;
@@ -255,14 +277,15 @@ export function drainSignals() {
 }
 
 function fabriqWentStale(signal, now = Date.now()) {
-  if (!isFabriq(signal)) return false;
-  const staleSec = Number(config.externalSignals?.fabriq?.staleAfterSec ?? 1800);
+  if (!isExternal(signal)) return false;
+  const source = signal.source === "gmgn" ? config.externalSignals?.gmgnTrending : config.externalSignals?.fabriq;
+  const staleSec = Number(source?.staleAfterSec ?? 1800);
   const last = signal.lastAlertAt || signal.createdAt || now;
   return now - last >= Math.max(1, staleSec) * 1000;
 }
 
 async function triggeringExposureGone(signal) {
-  if (isFabriq(signal)) return false;
+  if (isExternal(signal)) return false;
   const events = signal.events || [];
   if (!events.length) return false;
   let present = 0;
@@ -284,8 +307,8 @@ export async function pursueSignal(signal) {
   let lastReason = "no attempt";
   while (!shuttingDown && signalStillOpen(signal)) {
     if (fabriqWentStale(signal)) {
-      endSignal(signal, "fabriq alert went stale");
-      log("signal", `Signal ${signal.mint.slice(0, 8)} ended: fabriq alert went stale`);
+      endSignal(signal, `${signal.source} alert went stale`);
+      log("signal", `Signal ${signal.mint.slice(0, 8)} ended: ${signal.source} alert went stale`);
       return;
     }
     if (await triggeringExposureGone(signal)) {
@@ -352,7 +375,7 @@ async function attemptOwnerEntry(signal) {
   const now = Date.now();
   const cooldownMs = Number(rules.screenCooldownMs) || 0;
   const retryDue = signal.gmgnRetryAt > now ? false : signal.gmgnRetryAt > 0;
-  if (isFabriq(signal) && signal.lastScreenAt && cooldownMs > 0 && now - signal.lastScreenAt < cooldownMs && !retryDue) {
+  if (isExternal(signal) && signal.lastScreenAt && cooldownMs > 0 && now - signal.lastScreenAt < cooldownMs && !retryDue) {
     return "fabriq screen cooldown";
   }
   const window = ownerSnapshotWindow(now, rules);
@@ -392,7 +415,7 @@ async function attemptOwnerEntry(signal) {
       log("entry", `market fallback failed for ${signal.mint.slice(0, 8)}: ${error.message}`);
     }
   }
-  if (isFabriq(signal)) signal.lastScreenAt = now;
+  if (isExternal(signal)) signal.lastScreenAt = now;
   const screened = snapshot?.ok === false
     ? { pass: false, reasons: [snapshot?.reason || "market snapshot unavailable"], display: { checks: {} } }
     : evaluateEntry(snapshot, rules);
@@ -753,6 +776,25 @@ function startFabriqWatch() {
   return () => poller.stop();
 }
 
+function startGmgnTrendingWatch() {
+  const rules = config.externalSignals?.gmgnTrending;
+  if (!rules?.enabled) return () => {};
+  if (!process.env.GMGN_API_KEY) {
+    log("gmgn", "Trending watch is enabled but GMGN_API_KEY is not set, so it is off");
+    return () => {};
+  }
+  if (!ownerGmgn.gate) ownerGmgn.gate = createGmgnGate();
+  const poller = createGmgnTrendingPoller({
+    rules,
+    gate: ownerGmgn.gate,
+    log: message => log("gmgn", message),
+    onAlerts: alerts => { ingestGmgnAlerts(alerts); },
+  });
+  void poller.start();
+  log("gmgn", `Watching GMGN trending every ${rules.pollSec}s as a trigger: 5m vol >= $${rules.minVolume5mUsd}, mcap >= $${rules.minMarketCapUsd}, bundled < ${Math.round(rules.maxBundlerRate * 100)}% (staleAfterSec=${rules.staleAfterSec})`);
+  return () => poller.stop();
+}
+
 function acquireLock() {
   lockPath = repoPath("standalone.lock");
   if (fs.existsSync(lockPath)) {
@@ -772,6 +814,7 @@ async function shutdown(signalName) {
   log("runtime", `${signalName} received — shutting down`);
   for (const timer of Object.values(timers)) clearInterval(timer);
   try { stopFabriq(); } catch { /* best-effort */ }
+  try { stopGmgnTrending(); } catch { /* best-effort */ }
   try { stopAdmin?.(); } catch { /* best-effort */ }
   try { await monitor?.stop(); } catch { /* best-effort */ }
   // Best-effort stop notice; never let a slow Telegram call hold shutdown.
@@ -795,6 +838,7 @@ export async function startStandalone() {
 
   monitor = new WalletMonitor(store, config.standalone, { onSignal, wallets: watchedWallets });
   stopFabriq = startFabriqWatch();
+  stopGmgnTrending = startGmgnTrendingWatch();
   const modeLabel = transactionsAreDryRun()
     ? (config.standalone.shadow ? "SHADOW MODE (proposals recorded, nothing submitted)" : "DRY RUN (shadow is off, but DRY_RUN=true still blocks submits)")
     : "LIVE MODE";
