@@ -229,11 +229,20 @@ export async function fetchGmgn1m({
   cache = null,
   deadline = null,
   log = null,
+  calls = null,
 }) {
   if (!(to > from) || (to - from) % 60_000 !== 0) return { ok: false, reason: "1m window is invalid" };
   const cacheKey = `raw:${mint}:${from}:${to}`;
   const cached = cache?.get(cacheKey);
-  if (cached && now() - cached.at < (rules.candleCacheMs ?? 60_000)) return cached.value;
+  if (cached && now() - cached.at < (rules.klineCacheMs ?? rules.candleCacheMs ?? 60_000)) return cached.value;
+  const seriesKey = `kline:${mint}:${rules.gmgnResolution || "1m"}`;
+  const seriesTtl = rules.klineCacheMs ?? rules.candleCacheMs ?? 60_000;
+  const seriesHit = cache?.get(seriesKey);
+  if (seriesHit && now() - seriesHit.at < seriesTtl && seriesHit.from <= from && seriesHit.to >= to) {
+    const sliced = seriesHit.candles.filter(candle => candle.t >= from && candle.t < to);
+    const reused = continuousSeries(sliced, 60_000, (to - from) / 60_000);
+    if (reused.ok) return reused;
+  }
   const pageMs = rules.gmgnPageBars * 60_000;
   const cost = rules.gmgnCandleCreditCost;
   let cursor = to;
@@ -244,11 +253,12 @@ export async function fetchGmgn1m({
     await waitForGmgn(gate, now, sleep);
     if (!budget.take(cost, now())) {
       const wait = budget.waitMs(cost, now());
-      if (wait == null) return { ok: false, reason: "gmgn credit window exhausted" };
+      if (wait == null) return { ok: false, reason: "gmgn credit window exhausted", retryAt: now() + (rules.gmgnWindowMs ?? 1000), retry: true };
       await sleep(wait);
-      if (!budget.take(cost, now())) return { ok: false, reason: "gmgn credit window exhausted" };
+      if (!budget.take(cost, now())) return { ok: false, reason: "gmgn credit window exhausted", retryAt: now() + (rules.gmgnWindowMs ?? 1000), retry: true };
     }
     const url = stampGmgnAuth(gmgnKlineUrl(rules, { mint, from: pageFrom, to: cursor }), now());
+    if (calls) calls.n += 1;
     let response;
     try {
       response = await gmgnClient(fetchImpl)(url, gmgnRequestInit(apiKey));
@@ -266,7 +276,7 @@ export async function fetchGmgn1m({
         await sleep(Math.max(0, resetAt - now()));
         continue;
       }
-      return { ok: false, reason: "gmgn 429; paused until reset" };
+      return { ok: false, reason: "gmgn 429; paused until reset", retryAt: resetAt, retry: true };
     }
     if (!response.ok) {
       const body = await gmgnBody(response);
@@ -284,7 +294,10 @@ export async function fetchGmgn1m({
   const merged = dedupeCandles(collected.filter(candle => candle.t >= from && candle.t < to));
   if (!merged.ok) return merged;
   const series = continuousSeries(merged.candles, 60_000, (to - from) / 60_000);
-  if (series.ok) cache?.set(cacheKey, { at: now(), value: series });
+  if (series.ok) {
+    cache?.set(cacheKey, { at: now(), value: series });
+    cache?.set(seriesKey, { at: now(), from, to, candles: merged.candles });
+  }
   return series;
 }
 
@@ -376,18 +389,20 @@ export function parseTokenCreatedAt(body) {
   return { ok: true, createdAt: n < 1e12 ? n * 1000 : n };
 }
 
-export async function fetchTokenCreatedAt({ rules, mint, fetchImpl, sleep = () => Promise.resolve(), now = Date.now, budget, apiKey = "", gate = null, cache = null, deadline = null, rateRetries = 0, log = null }) {
+export async function fetchTokenCreatedAt({ rules, mint, fetchImpl, sleep = () => Promise.resolve(), now = Date.now, budget, apiKey = "", gate = null, cache = null, deadline = null, rateRetries = 0, log = null, calls = null }) {
   const cacheKey = `created:${mint}`;
   const cached = cache?.get(cacheKey);
-  if (cached && now() - cached.at < (rules.candleCacheMs ?? 60_000)) return cached.value;
+  const infoTtl = rules.tokenInfoCacheMs ?? 30 * 60 * 1000;
+  if (cached && now() - cached.at < infoTtl) return cached.value;
   const cost = rules.gmgnInfoCreditCost ?? 1;
   await waitForGmgn(gate, now, sleep);
   if (!budget.take(cost, now())) {
     const wait = budget.waitMs(cost, now());
-    if (wait == null) return { ok: false, reason: "gmgn credit window exhausted" };
+    if (wait == null) return { ok: false, reason: "gmgn credit window exhausted", retryAt: now() + (rules.gmgnWindowMs ?? 1000), retry: true };
     await sleep(wait);
-    if (!budget.take(cost, now())) return { ok: false, reason: "gmgn credit window exhausted" };
+    if (!budget.take(cost, now())) return { ok: false, reason: "gmgn credit window exhausted", retryAt: now() + (rules.gmgnWindowMs ?? 1000), retry: true };
   }
+  if (calls) calls.n += 1;
   const url = stampGmgnAuth(new URL(rules.gmgnTokenInfoPath, rules.gmgnBaseUrl), now());
   url.searchParams.set("chain", rules.gmgnChain);
   url.searchParams.set("address", mint);
@@ -405,9 +420,9 @@ export async function fetchTokenCreatedAt({ rules, mint, fetchImpl, sleep = () =
     if (gate) gate.pausedUntil = Math.max(gate.pausedUntil, resetAt);
     if (gmgnRetryWithinDeadline(deadline, resetAt) && rateRetries < 3) {
       await sleep(Math.max(0, resetAt - now()));
-      return fetchTokenCreatedAt({ rules, mint, fetchImpl, sleep, now, budget, apiKey, gate, cache, deadline, log, rateRetries: rateRetries + 1 });
+      return fetchTokenCreatedAt({ rules, mint, fetchImpl, sleep, now, budget, apiKey, gate, cache, deadline, log, calls, rateRetries: rateRetries + 1 });
     }
-    return { ok: false, reason: "gmgn 429; paused until reset" };
+    return { ok: false, reason: "gmgn 429; paused until reset", retryAt: resetAt, retry: true };
   }
   if (!response.ok) {
     const body = await gmgnBody(response);
@@ -431,17 +446,20 @@ export function gmgnMarketData(rules, deps = {}) {
       const clock = deps.now ?? Date.now;
       const to = window.to ?? clock() - (clock() % 60_000);
       const deadline = window.deadline ?? deps.deadline ?? null;
-      const created = await fetchTokenCreatedAt({ ...deps, rules, mint, budget, apiKey, deadline });
-      if (!created.ok) return created;
+      const calls = deps.calls || { n: 0 };
+      const counted = { ...deps, calls };
+      const withCalls = result => ({ ...result, gmgnCalls: calls.n });
+      const created = await fetchTokenCreatedAt({ ...counted, rules, mint, budget, apiKey, deadline, calls });
+      if (!created.ok) return withCalls(created);
       const lookbackStart = to - rules.pocLookbackHours * 3_600_000;
       const lifeStart = created.createdAt - (created.createdAt % 60_000);
       const from = Math.max(window.from ?? lookbackStart, lifeStart);
-      if (!(to > from)) return { ok: false, reason: "gmgn window is incomplete" };
+      if (!(to > from)) return withCalls({ ok: false, reason: "gmgn window is incomplete" });
       const cacheKey = `quote:${mint}:${from}:${to}`;
       const cached = deps.cache?.get(cacheKey);
-      if (cached && clock() - cached.at < (rules.candleCacheMs ?? 60_000)) return cached.value;
-      const series = await fetchQuoteGmgn1m({ ...deps, rules, mint, from, to, budget, apiKey, deadline });
-      if (!series.ok) return series;
+      if (cached && clock() - cached.at < (rules.klineCacheMs ?? rules.candleCacheMs ?? 60_000)) return withCalls(cached.value);
+      const series = await fetchQuoteGmgn1m({ ...counted, rules, mint, from, to, budget, apiKey, deadline, calls });
+      if (!series.ok) return withCalls(series);
       const value = {
         ok: true,
         priceDenomination: "quote",
@@ -451,6 +469,7 @@ export function gmgnMarketData(rules, deps = {}) {
         createdAt: created.createdAt,
         closed1m: series.candles,
         closed5m: completed5m(series.candles),
+        gmgnCalls: calls.n,
       };
       deps.cache?.set(cacheKey, { at: clock(), value });
       return value;

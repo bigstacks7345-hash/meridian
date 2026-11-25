@@ -34,84 +34,176 @@ export function watchedConvergence(events, rules, now) {
   return triggered;
 }
 
+function candleList(value) {
+  return Array.isArray(value) ? value.filter(bar => Number.isFinite(bar?.t)) : [];
+}
+
+// Enough 1m bars run the indicators. Fewer bars use 5m candles. No candles fails closed.
+export function chooseIndicatorCandles(snapshot, rules = {}) {
+  const minBars = Number(rules.minIndicatorBars) > 0 ? Number(rules.minIndicatorBars) : 30;
+  const closed1m = candleList(snapshot?.closed1m);
+  const one = snapshot?.current1m && Number.isFinite(snapshot.current1m.t) ? [...closed1m, snapshot.current1m] : closed1m;
+  if (one.length >= minBars) return { ok: true, candles: one, closed: closed1m, timeframe: "1m" };
+  const five = candleList(snapshot?.closed5m);
+  if (five.length > 0) return { ok: true, candles: five, closed: five, timeframe: "5m", fallback: true };
+  if (one.length > 0) return { ok: true, candles: one, closed: closed1m, timeframe: "1m", short: true };
+  return { ok: false, reason: "no candles" };
+}
+
+export function formatScreenSummary(mint, result, { gmgnCalls = 0 } = {}) {
+  const checks = result?.display?.checks || {};
+  const body = Object.entries(checks).map(([key, state]) => `${key}=${state}`).join(" ");
+  const detail = body || (result?.reasons || []).filter(Boolean).join("; ") || "no checks";
+  const id = mint ? String(mint).slice(0, 8) : "?";
+  return `screen ${id} ${result?.pass ? "pass" : "fail"} ${detail} gmgnCalls=${gmgnCalls}`;
+}
+
 export function evaluateEntry(snapshot, rules) {
   const reasons = [];
-  const display = {};
+  const display = { checks: {} };
   if (!snapshot || snapshot.ok === false) {
     return { pass: false, reasons: [snapshot?.reason || "market snapshot unavailable"], display };
   }
   const binStep = num(snapshot.binStep);
   const liquidity = num(snapshot.liquidityUsd);
   const mcap = num(snapshot.mcapUsd);
-  const holders = num(snapshot.holders);
+  const holders = snapshot.holders == null || snapshot.holders === "" ? null : num(snapshot.holders);
   const livePrice = num(snapshot.livePrice);
   if (snapshot.priceDenomination !== rules.priceDenomination) reasons.push("price denomination is not the pool quote");
-  if (binStep == null) reasons.push("bin step unavailable");
-  else if (binStep < rules.binStepMin || binStep > rules.binStepMax) reasons.push(`bin step ${binStep} outside ${rules.binStepMin}-${rules.binStepMax}`);
-  if (liquidity == null) reasons.push("pool liquidity unavailable");
-  else if (liquidity < rules.liquidityMinUsd || liquidity > rules.liquidityMaxUsd) reasons.push(`liquidity ${liquidity} outside ${rules.liquidityMinUsd}-${rules.liquidityMaxUsd}`);
-  if (mcap == null) reasons.push("market cap unavailable");
-  else if (mcap < rules.mcapMinUsd || (rules.mcapMaxUsd != null && mcap > rules.mcapMaxUsd)) reasons.push(`market cap ${mcap} outside limits`);
-  if (holders == null) reasons.push("holders unavailable");
-  else if (holders < rules.holdersMin) reasons.push(`holders ${holders} below ${rules.holdersMin}`);
-  if (livePrice == null || livePrice <= 0) reasons.push("live price unavailable");
+  if (binStep == null) {
+    reasons.push("bin step unavailable");
+    display.checks.bin = "fail";
+  } else if (binStep < rules.binStepMin || binStep > rules.binStepMax) {
+    reasons.push(`bin step ${binStep} outside ${rules.binStepMin}-${rules.binStepMax}`);
+    display.checks.bin = "fail";
+  } else display.checks.bin = "pass";
+  if (liquidity == null) {
+    reasons.push("pool liquidity unavailable");
+    display.checks.liq = "fail";
+  } else if (liquidity < rules.liquidityMinUsd || liquidity > rules.liquidityMaxUsd) {
+    reasons.push(`liquidity ${liquidity} outside ${rules.liquidityMinUsd}-${rules.liquidityMaxUsd}`);
+    display.checks.liq = "fail";
+  } else display.checks.liq = "pass";
+  if (mcap == null) {
+    reasons.push("market cap unavailable");
+    display.checks.mcap = "fail";
+  } else if (mcap < rules.mcapMinUsd || (rules.mcapMaxUsd != null && mcap > rules.mcapMaxUsd)) {
+    reasons.push(`market cap ${mcap} outside limits`);
+    display.checks.mcap = "fail";
+  } else display.checks.mcap = "pass";
+  if (holders == null) {
+    display.holdersNote = "holders unavailable";
+    display.checks.holders = rules.holdersRequired === true ? "fail" : "skip";
+    if (rules.holdersRequired === true) reasons.push("holders unavailable");
+  } else if (holders < rules.holdersMin) {
+    display.holdersNote = `holders ${holders} below ${rules.holdersMin}`;
+    display.checks.holders = rules.holdersRequired === true ? "fail" : "skip";
+    if (rules.holdersRequired === true) reasons.push(`holders ${holders} below ${rules.holdersMin}`);
+  } else display.checks.holders = "pass";
+  if (livePrice == null || livePrice <= 0) {
+    reasons.push("live price unavailable");
+    display.checks.price = "fail";
+  } else display.checks.price = "pass";
 
   const closed5m = snapshot.closed5m;
-  if (!Array.isArray(closed5m) || closed5m.length < 1) reasons.push("previous 5m volume unavailable");
-  else {
+  if (!Array.isArray(closed5m) || closed5m.length < 1) {
+    reasons.push("previous 5m volume unavailable");
+    display.checks.vol5m = "fail";
+  } else {
     const previous = closed5m[closed5m.length - 1];
     const volume = num(previous?.v);
-    if (volume == null) reasons.push("previous 5m volume unavailable");
-    else if (volume < rules.prev5mVolumeMinUsd) reasons.push(`previous 5m volume ${volume} below ${rules.prev5mVolumeMinUsd}`);
+    if (volume == null) {
+      reasons.push("previous 5m volume unavailable");
+      display.checks.vol5m = "fail";
+    } else if (volume < rules.prev5mVolumeMinUsd) {
+      reasons.push(`previous 5m volume ${volume} below ${rules.prev5mVolumeMinUsd}`);
+      display.checks.vol5m = "fail";
+    } else display.checks.vol5m = "pass";
   }
 
-  const bars1m = Array.isArray(snapshot.closed1m) && snapshot.current1m
-    ? [...snapshot.closed1m, snapshot.current1m]
-    : null;
-  const volumeCheck = bars1m ? volumeAboveSma(bars1m, rules.volumeSmaPeriod) : null;
-  if (!volumeCheck) reasons.push("1m volume SMA unavailable");
-  else if (!volumeCheck.above) reasons.push("current 1m volume is not above its SMA");
+  const chosen = chooseIndicatorCandles(snapshot, rules);
+  display.indicatorTimeframe = chosen.timeframe || null;
+  const tf = chosen.timeframe || "1m";
+  const indicatorBars = chosen.ok ? chosen.candles : null;
+  const volumeCheck = indicatorBars ? volumeAboveSma(indicatorBars, rules.volumeSmaPeriod) : null;
+  if (!volumeCheck) {
+    reasons.push(chosen.ok ? `${tf} volume SMA unavailable` : chosen.reason);
+    display.checks.volSma = "fail";
+  } else if (!volumeCheck.above) {
+    reasons.push(`current ${tf} volume is not above its SMA`);
+    display.checks.volSma = "fail";
+  } else display.checks.volSma = "pass";
   display.volume = volumeCheck;
 
-  const rsi = bars1m ? rsiWithSma(bars1m, rules.rsiLength, rules.rsiSmaLength) : null;
-  if (!rsi || rsi.value == null) reasons.push("1m RSI unavailable");
-  else if (rsi.value < rules.rsiMin || rsi.value > rules.rsiMax) reasons.push(`RSI ${rsi.value} outside ${rules.rsiMin}-${rules.rsiMax}`);
+  const rsi = indicatorBars ? rsiWithSma(indicatorBars, rules.rsiLength, rules.rsiSmaLength) : null;
+  if (!rsi || rsi.value == null) {
+    if (chosen.ok) reasons.push(`${tf} RSI unavailable`);
+    display.checks.rsi = "fail";
+  } else if (rsi.value < rules.rsiMin || rsi.value > rules.rsiMax) {
+    reasons.push(`RSI ${rsi.value} outside ${rules.rsiMin}-${rules.rsiMax}`);
+    display.checks.rsi = "fail";
+  } else display.checks.rsi = "pass";
   display.rsi = rsi ? rsi.value : null;
   display.rsiSma = rsi ? rsi.sma : null;
 
-  const trend = Array.isArray(snapshot.closed1m) ? supertrend(snapshot.closed1m, {
+  const trendSource = chosen.ok ? (tf === "1m" ? chosen.closed : chosen.candles) : null;
+  const trend = trendSource && trendSource.length ? supertrend(trendSource, {
     atrLength: rules.supertrendAtrLength,
     factor: rules.supertrendFactor,
   }) : null;
-  if (!trend || trend.trend !== "up" || trend.support == null) reasons.push("1m Supertrend support unavailable");
-  else if (!(livePrice > trend.value)) reasons.push("live price is not above the 1m Supertrend");
+  if (!trend || trend.trend !== "up" || trend.support == null) {
+    if (chosen.ok) reasons.push(`${tf} Supertrend support unavailable`);
+    display.checks.trend = "fail";
+  } else if (!(livePrice > trend.value)) {
+    reasons.push(`live price is not above the ${tf} Supertrend`);
+    display.checks.trend = "fail";
+  } else display.checks.trend = "pass";
   display.supertrend = trend;
 
-  display.bollinger = bars1m ? bollinger(bars1m, {
+  display.bollinger = indicatorBars ? bollinger(indicatorBars, {
     length: rules.bollingerLength,
     mult: rules.bollingerMult,
     offset: rules.bollingerOffset,
   }) : null;
 
-  const series = selectProfileWindow(snapshot.closed1m, {
+  const hasCandles = candleList(snapshot.closed1m).length > 0 || candleList(snapshot.closed5m).length > 0;
+  const series = hasCandles ? selectProfileWindow(snapshot.closed1m, {
     createdAt: snapshot.createdAt,
     asOf: snapshot.asOf,
     lookbackMs: rules.pocLookbackHours * 3_600_000,
     toleranceMs: rules.pocLaunchToleranceMs,
-  });
+  }) : { ok: false, reason: "no candles" };
   let profile = null;
-  if (!series.ok) reasons.push(series.reason);
-  else {
+  if (!hasCandles) {
+    if (!reasons.includes("no candles")) reasons.push("no candles");
+    display.checks.poc = "fail";
+  } else if (!series.ok) {
+    const created = num(snapshot.createdAt);
+    const asOf = num(snapshot.asOf);
+    const young = created != null && asOf != null && asOf - created <= rules.pocLookbackHours * 3_600_000;
+    if (young) {
+      reasons.push(series.reason);
+      display.checks.poc = "fail";
+    } else {
+      display.pocNote = series.reason;
+      display.checks.poc = "skip";
+    }
+  } else {
     profile = volumeProfile(series.candles, { rows: rules.pocRows, valueArea: rules.pocValueArea });
-    if (!profile) reasons.push("volume profile unavailable");
+    if (!profile) {
+      reasons.push("volume profile unavailable");
+      display.checks.poc = "fail";
+    } else display.checks.poc = "pass";
   }
   display.profile = profile;
 
   const crash = crashDrawdown(snapshot, rules);
   display.crashGuard = crash;
+  display.checks.crash = crash.ok ? "pass" : "fail";
   if (!crash.ok && crash.reason) reasons.push(crash.reason);
   const depth = poolDepth(snapshot, rules);
   display.poolDepth = depth;
+  display.checks.depth = depth.ok ? "pass" : "fail";
   if (!depth.ok && depth.reason) reasons.push(depth.reason);
 
   return { pass: reasons.length === 0, reasons, display };
