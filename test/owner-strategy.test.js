@@ -56,7 +56,6 @@ test("every entry filter fails closed on its own and together they can pass", ()
     ["liquidityUsd", 9_000, "liquidity"],
     ["liquidityUsd", 200_000, "liquidity"],
     ["mcapUsd", 349_000, "market cap"],
-    ["holders", 1499, "holders"],
     ["livePrice", null, "live price"],
   ];
   for (const [key, value, text] of missing) {
@@ -64,8 +63,11 @@ test("every entry filter fails closed on its own and together they can pass", ()
     assert.equal(result.pass, false, key);
     assert.ok(result.reasons.some(reason => reason.includes(text)), result.reasons.join("; "));
   }
-  const thinVolume = { ...base, closed5m: [{ ...base.closed5m.at(-1), v: 89_999 }] };
+  const thinVolume = { ...base, closed5m: [{ ...base.closed5m.at(-1), v: 29_999 }] };
   assert.ok(evaluateEntry(thinVolume, rules).reasons.some(reason => reason.includes("5m volume")));
+  assert.equal(evaluateEntry({ ...base, closed5m: [{ ...base.closed5m.at(-1), v: 30_000 }] }, rules).pass, true);
+  assert.equal(evaluateEntry({ ...base, holders: null }, rules).pass, true);
+  assert.equal(evaluateEntry({ ...base, holders: 1 }, { ...rules, holdersRequired: true }).pass, false);
   const quiet = { ...base, current1m: { ...base.current1m, v: 1 } };
   assert.ok(evaluateEntry(quiet, rules).reasons.some(reason => reason.includes("volume")));
   assert.equal(evaluateEntry({ ...base, mcapUsd: 50_000_000 }, rules).pass, true);

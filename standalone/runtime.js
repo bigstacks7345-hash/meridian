@@ -23,6 +23,8 @@ import { recordPositionSnapshot } from "../pool-memory.js";
 import { getDeterministicCloseRule, computeBinsBelow } from "../exit-rules.js";
 import { startAdmin } from "./telegram-admin.js";
 import { planShadowEntry, stepShadowBook } from "../strategy/shadow.js";
+import { evaluateEntry, formatScreenSummary } from "../strategy/rules.js";
+import { enrichMissingMarket } from "../strategy/pool-fallbacks.js";
 import { liquidityCloseSummary, simulateLiquidity } from "../strategy/liquidity-management.js";
 import { recordExit, recordLiquidity, recordScreening } from "./decisions.js";
 import { createGmgnGate, createMarketData, createRequestBudget, gmgnFetch } from "../strategy/market-data.js";
@@ -46,6 +48,7 @@ let idleWaiters = [];
 const defaultPursuitDeps = {
   sleep,
   exposureStillPresent,
+  fetchImpl: (...args) => globalThis.fetch(...args),
   createMarketData: deadline => createOwnerMarketData({ deadline }),
 };
 const pursuitDeps = { ...defaultPursuitDeps };
@@ -63,7 +66,12 @@ function signalOptions() {
 }
 
 function endSignal(signal, reason, now = Date.now()) {
-  finishSignal(store, signal, reason, signalOptions(), now);
+  const options = { ...signalOptions() };
+  if (isFabriq(signal)) {
+    const ms = Number(config.ownerStrategy.screenCooldownMs);
+    if (Number.isFinite(ms) && ms >= 0) options.cooldownSec = ms / 1000;
+  }
+  finishSignal(store, signal, reason, options, now);
 }
 
 function signalStillOpen(signal, now = Date.now()) {
@@ -76,6 +84,7 @@ function nextRetryMs(signal, now = Date.now()) {
   const slow = Math.max(fast, Number(config.standalone.slowRetrySec ?? 60) * 1000);
   const after = Math.max(0, Number(config.standalone.slowRetryAfterSec ?? 300)) * 1000;
   let wait = age < after ? fast : slow;
+  if (signal.gmgnRetryAt > now) wait = Math.max(wait, signal.gmgnRetryAt - now);
   if (signal.deadline != null) wait = Math.min(wait, Math.max(0, signal.deadline - now));
   else if (wait === 0) wait = 1000;
   return wait;
@@ -341,6 +350,11 @@ async function attemptOwnerEntry(signal) {
   const rules = config.ownerStrategy;
   const book = Array.isArray(store.data.shadowBook) ? store.data.shadowBook : [];
   const now = Date.now();
+  const cooldownMs = Number(rules.screenCooldownMs) || 0;
+  const retryDue = signal.gmgnRetryAt > now ? false : signal.gmgnRetryAt > 0;
+  if (isFabriq(signal) && signal.lastScreenAt && cooldownMs > 0 && now - signal.lastScreenAt < cooldownMs && !retryDue) {
+    return "fabriq screen cooldown";
+  }
   const window = ownerSnapshotWindow(now, rules);
   let snapshot;
   try {
@@ -354,8 +368,35 @@ async function attemptOwnerEntry(signal) {
     return reason;
   }
   if (signal.done) return null;
+  const gmgnCalls = snapshot?.gmgnCalls ?? 0;
+  if (snapshot?.retry) {
+    signal.gmgnRetryAt = snapshot.retryAt || now + 1000;
+    log("gmgn", `queued ${signal.mint.slice(0, 8)} ${snapshot.reason}; calls=${gmgnCalls}`);
+    log("entry", formatScreenSummary(signal.mint, { pass: false, reasons: [snapshot.reason], display: { checks: {} } }, { gmgnCalls }));
+    return snapshot.reason;
+  }
+  signal.gmgnRetryAt = 0;
   if (signal.pool && snapshot?.ok) snapshot = { ...snapshot, poolAddress: signal.pool };
   snapshot = await attachPoolVolume(signal, snapshot);
+  if (snapshot?.ok) {
+    try {
+      snapshot = await enrichMissingMarket(snapshot, {
+        mint: signal.mint,
+        pool: signal.pool || snapshot.poolAddress,
+        solMint: rules.quoteMint,
+        fetchImpl: pursuitDeps.fetchImpl,
+        meteoraPoolsUrl: rules.meteoraPoolsUrl,
+        dexscreenerTokensUrl: rules.dexscreenerTokensUrl,
+      });
+    } catch (error) {
+      log("entry", `market fallback failed for ${signal.mint.slice(0, 8)}: ${error.message}`);
+    }
+  }
+  if (isFabriq(signal)) signal.lastScreenAt = now;
+  const screened = snapshot?.ok === false
+    ? { pass: false, reasons: [snapshot?.reason || "market snapshot unavailable"], display: { checks: {} } }
+    : evaluateEntry(snapshot, rules);
+  log("entry", formatScreenSummary(signal.mint, screened, { gmgnCalls }));
   const decision = planShadowEntry({ signal, snapshot, book, rules, now });
   const logged = safeScreeningLog({ now, signal, snapshot, book, rules, result: decision, reason: decision.ok ? "shadow proposal recorded" : decision.reason });
   if (decision.proposal && logged) decision.proposal.decisionId = logged.id;
