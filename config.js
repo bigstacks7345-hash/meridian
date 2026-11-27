@@ -91,6 +91,29 @@ function seaStateConfig(raw = {}) {
   };
 }
 
+// Weekly coin-cycle report: how far triggered coins run and how deep they dump
+// before an exit bounce. GeckoTerminal candles (free, 30 req/min). Read-only.
+function coinCyclesConfig(raw = {}) {
+  const pick = (value, fallback, min = 0) => {
+    const n = Number(value);
+    return Number.isFinite(n) && n > min ? n : fallback;
+  };
+  const runAtUtc = /^([01]\d|2[0-3]):[0-5]\d$/.test(String(raw.runAtUtc ?? "")) ? raw.runAtUtc : "02:00";
+  return {
+    enabled: raw.enabled === undefined ? true : Boolean(raw.enabled),
+    notify: raw.notify === undefined ? true : Boolean(raw.notify),
+    runAtUtc, // Mondays
+    windowHours: pick(raw.windowHours, 72),
+    bouncePct: pick(raw.bouncePct, 20),
+    mcBuckets: [1e6, 5e6, 20e6],
+    binSteps: [80, 100, 125, 250],
+    minBins: MIN_SAFE_BINS_BELOW,
+    maxSingleTxBins: 69,
+    requestGapMs: Math.max(2100, pick(raw.requestGapMs, 2500)),
+    maxCoins: Math.round(pick(raw.maxCoins, 400)),
+  };
+}
+
 function numericConfig(value) {
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
@@ -281,6 +304,7 @@ export const config = {
 
   // Daily market context only. It never gates entries.
   seaState: seaStateConfig(u.seaState),
+  coinCycles: coinCyclesConfig(u.coinCycles),
 
   jupiter: {
     // Internal Jupiter Ultra settings; override by env only, do not expose in user-config.
