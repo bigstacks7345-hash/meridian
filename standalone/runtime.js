@@ -411,6 +411,7 @@ async function attemptOwnerEntry(signal) {
         meteoraPoolsUrl: rules.meteoraPoolsUrl,
         dexscreenerTokensUrl: rules.dexscreenerTokensUrl,
       });
+      if (snapshot?.fallbackErrors?.length) log("entry", `market fallback for ${signal.mint.slice(0, 8)}: ${snapshot.fallbackErrors.join("; ")}`);
     } catch (error) {
       log("entry", `market fallback failed for ${signal.mint.slice(0, 8)}: ${error.message}`);
     }

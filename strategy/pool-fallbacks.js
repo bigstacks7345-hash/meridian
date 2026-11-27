@@ -21,11 +21,14 @@ export function parseMeteoraPools(body, mint, solMint) {
     const tokenY = row?.token_y?.address || row?.mint_y;
     if (mint && tokenX && tokenX !== mint) continue;
     if (solMint && tokenY && tokenY !== solMint) continue;
+    // Meteora's datapi moved bin step to pool_config.bin_step and made volume
+    // an object keyed by window ({"30m":..,"1h":..}). Read old and new shapes.
+    const volume = row?.volume;
     const parsed = {
-      binStep: num(row?.dlmm_params?.bin_step ?? row?.bin_step),
+      binStep: num(row?.dlmm_params?.bin_step ?? row?.pool_config?.bin_step ?? row?.bin_step),
       liquidityUsd: num(row?.tvl ?? row?.liquidity),
       livePrice: num(row?.pool_price ?? row?.current_price),
-      volume5mUsd: num(row?.volume),
+      volume5mUsd: volume && typeof volume === "object" ? num(volume["5m"]) : num(volume),
       poolAddress: row?.pool_address || row?.address || null,
     };
     if (parsed.binStep == null && parsed.liquidityUsd == null && parsed.livePrice == null) continue;
@@ -98,23 +101,29 @@ export async function enrichMissingMarket(snapshot, {
   if (!needPool && !needDex) return snapshot;
   let meteora = null;
   let dex = null;
+  const fallbackErrors = [];
   if (needPool) {
     try {
       const url = pool
         ? `${meteoraPoolsUrl}/${pool}`
         : `${meteoraPoolsUrl}?${new URLSearchParams({ query: mint, page_size: "20", sort_by: "tvl:desc" })}`;
       meteora = parseMeteoraPools(await readJson(fetchImpl, url), mint, solMint);
-    } catch {
+      if (!meteora) fallbackErrors.push(`meteora: no ${pool ? "match for pool" : "mint/SOL DLMM pool"}`);
+    } catch (error) {
       meteora = null;
+      fallbackErrors.push(`meteora: ${error.message}`);
     }
   }
   const stillNeedDex = needDex && (num(snapshot.mcapUsd) == null || (num(snapshot.livePrice) == null && num(meteora?.livePrice) == null) || (num(snapshot.liquidityUsd) == null && num(meteora?.liquidityUsd) == null));
   if (stillNeedDex) {
     try {
       dex = parseDexScreener(await readJson(fetchImpl, `${dexscreenerTokensUrl}/${mint}`), mint, solMint);
-    } catch {
+      if (!dex) fallbackErrors.push("dexscreener: no pairs");
+    } catch (error) {
       dex = null;
+      fallbackErrors.push(`dexscreener: ${error.message}`);
     }
   }
-  return fillMissingMarket(snapshot, { meteora, dex });
+  const filled = fillMissingMarket(snapshot, { meteora, dex });
+  return fallbackErrors.length ? { ...filled, fallbackErrors } : filled;
 }
