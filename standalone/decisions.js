@@ -86,6 +86,22 @@ function openOnMint(book, mint) {
 }
 
 function triggerOf(signal) {
+  if (signal?.source === "gmgn") {
+    const alert = signal.gmgnAlert || {};
+    return {
+      source: "gmgn",
+      post: {
+        id: alert.id ?? null,
+        symbol: alert.symbol ?? null,
+        marketCapUsd: finite(alert.marketCapUsd),
+        liquidityUsd: finite(alert.liquidityUsd),
+        volume5mUsd: finite(alert.volume5mUsd),
+        bundlerRate: finite(alert.bundlerRate),
+        change5mPct: finite(alert.change5mPct),
+        at: alert.at ?? null,
+      },
+    };
+  }
   if (signal?.source === "fabriq") {
     const alert = signal.fabriqAlert || {};
     return {

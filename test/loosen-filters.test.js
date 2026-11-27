@@ -166,6 +166,37 @@ test("Meteora and DexScreener fill only the missing pool fields", async () => {
   assert.equal(already.binStep, 100);
 });
 
+test("Meteora datapi rows with pool_config.bin_step and windowed volume fill bin step", async () => {
+  const mint = "81TW4gTEH4aNsSaKCoBhoznx9AG8AiYoBXfvEzJkpump";
+  const sol = "So11111111111111111111111111111111111111112";
+  // Shape returned by dlmm.datapi.meteora.ag/pools on 2026-11-27.
+  const row = {
+    address: "CLjyfDdfVi9KFD4UEixM2UoMzvgXwjmyxT3LwxsSKYRp",
+    token_x: { address: mint }, token_y: { address: sol },
+    tvl: 18_500, current_price: 5.97e-7,
+    volume: { "30m": 4_000, "1h": 9_000, "24h": 10_551 },
+    pool_config: { bin_step: 100, base_fee_pct: 2 },
+  };
+  const parsed = parseMeteoraPools({ data: [row] }, mint, sol);
+  assert.equal(parsed.binStep, 100);
+  assert.equal(parsed.liquidityUsd, 18_500);
+  assert.equal(parsed.poolAddress, row.address);
+  assert.equal(parsed.volume5mUsd, null, "no 5m window in the object means unknown, not NaN");
+  assert.equal(parseMeteoraPools({ data: [{ ...row, volume: { "5m": 1_200 } }] }, mint, sol).volume5mUsd, 1_200);
+
+  const filled = await enrichMissingMarket({ ok: true, binStep: null, liquidityUsd: null, livePrice: null, mcapUsd: null }, {
+    mint, solMint: sol,
+    meteoraPoolsUrl: "https://dlmm.example/pools",
+    dexscreenerTokensUrl: "https://dex.example/tokens",
+    fetchImpl: async url => String(url).includes("dlmm.example")
+      ? { ok: true, json: async () => ({ data: [row] }) }
+      : { ok: false, status: 429 },
+  });
+  assert.equal(filled.binStep, 100);
+  assert.equal(filled.marketSources.binStep, "meteora");
+  assert.deepEqual(filled.fallbackErrors, ["dexscreener: status 429"], "a failed fallback is reported, not swallowed");
+});
+
 test("GMGN caches token info for 30 minutes and klines for 60 seconds, and a 429 is queued", async () => {
   const cache = new Map();
   let clock = 1_000_000;
