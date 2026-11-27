@@ -25,6 +25,12 @@ export function decisionsDir() {
   return repoPath("state");
 }
 
+/** Runtime state directory for daily reports such as the sea state. */
+export function stateDir() {
+  if (process.env.STATE_DIR || runningAsTest()) return isolatedStateDir();
+  return repoPath("state");
+}
+
 export function monitorStateFile() {
   if (process.env.STATE_DIR || runningAsTest()) return path.join(isolatedStateDir(), "wallet-monitor-state.json");
   return repoPath("wallet-monitor-state.json");

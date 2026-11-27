@@ -13,6 +13,7 @@ import { sendMessage as tgSend, isEnabled as tgEnabled } from "../telegram.js";
 import { MonitorStore, acceptExternalAlert, acceptFabriqAlert, dropUnfinishedSignals, finishSignal, isExternalSignal, recordFabriqAlerts } from "./store.js";
 import { createGmgnTrendingPoller } from "./gmgn-trending.js";
 import { createFabriqPoller, withFabriqContext } from "./fabriq.js";
+import { createSeaStateScheduler } from "./sea-state.js";
 import { WalletMonitor } from "./monitor.js";
 import { screenMint, poolDetail } from "./screening.js";
 import { exposureStillPresent } from "./events.js";
@@ -38,6 +39,7 @@ let lockPath = null;
 let stopAdmin = null;
 let stopFabriq = () => {};
 let stopGmgnTrending = () => {};
+let stopSeaState = () => {};
 let notifySink = null;
 let fabriqStartupPending = true;
 let shuttingDown = false;
@@ -796,6 +798,19 @@ function startGmgnTrendingWatch() {
   return () => poller.stop();
 }
 
+function startSeaStateWatch() {
+  const rules = config.seaState;
+  if (!rules?.enabled) return () => {};
+  const scheduler = createSeaStateScheduler({
+    rules,
+    log: message => log("sea", message),
+    notify,
+  });
+  void scheduler.start();
+  log("sea", `Daily DLMM sea state at ${rules.runAtUtc} UTC (${rules.lookbackDays}-day average, Telegram ${rules.notify ? "on" : "off"})`);
+  return () => scheduler.stop();
+}
+
 function acquireLock() {
   lockPath = repoPath("standalone.lock");
   if (fs.existsSync(lockPath)) {
@@ -816,6 +831,7 @@ async function shutdown(signalName) {
   for (const timer of Object.values(timers)) clearInterval(timer);
   try { stopFabriq(); } catch { /* best-effort */ }
   try { stopGmgnTrending(); } catch { /* best-effort */ }
+  try { stopSeaState(); } catch { /* best-effort */ }
   try { stopAdmin?.(); } catch { /* best-effort */ }
   try { await monitor?.stop(); } catch { /* best-effort */ }
   // Best-effort stop notice; never let a slow Telegram call hold shutdown.
@@ -840,6 +856,7 @@ export async function startStandalone() {
   monitor = new WalletMonitor(store, config.standalone, { onSignal, wallets: watchedWallets });
   stopFabriq = startFabriqWatch();
   stopGmgnTrending = startGmgnTrendingWatch();
+  stopSeaState = startSeaStateWatch();
   const modeLabel = transactionsAreDryRun()
     ? (config.standalone.shadow ? "SHADOW MODE (proposals recorded, nothing submitted)" : "DRY RUN (shadow is off, but DRY_RUN=true still blocks submits)")
     : "LIVE MODE";
