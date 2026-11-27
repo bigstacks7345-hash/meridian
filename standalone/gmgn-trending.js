@@ -26,9 +26,19 @@ function usdLabel(n) {
 
 // GMGN filters server-side. Every row is checked again here so a loosened
 // server filter never slips through. Rows with a missing metric are dropped.
+// The raw OpenAPI reply is { code, data: { data: { rank: [...] } } }. gmgn-cli
+// strips the outer envelope before printing, which is why the PC script reads
+// `.data.rank`. Accept both shapes so a direct call and CLI output both parse.
 export function parseGmgnTrending(body, rules, now = Date.now()) {
-  const rows = body?.data?.rank;
-  if (!Array.isArray(rows)) return { ok: false, reason: "gmgn rank payload incomplete", alerts: [] };
+  if (body?.code != null && Number(body.code) !== 0) {
+    const detail = [body.error, body.message].filter(v => typeof v === "string" && v).join(": ");
+    return { ok: false, reason: `gmgn api code ${body.code}${detail ? ` (${detail})` : ""}`, alerts: [] };
+  }
+  const rows = Array.isArray(body?.data?.data?.rank) ? body.data.data.rank : body?.data?.rank;
+  if (!Array.isArray(rows)) {
+    const keys = body?.data && typeof body.data === "object" ? Object.keys(body.data).join(",") : typeof body?.data;
+    return { ok: false, reason: `gmgn rank payload incomplete (data keys: ${keys || "none"})`, alerts: [] };
+  }
   const bucketMs = Math.max(1, rules.refreshMin) * 60_000;
   const bucket = Math.floor(now / bucketMs);
   const alerts = [];

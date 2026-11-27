@@ -58,6 +58,36 @@ test("parser re-checks every rule locally and drops rows with missing metrics", 
   assert.equal(parseGmgnTrending({ data: {} }, rules, now).ok, false);
 });
 
+test("parser reads the raw OpenAPI envelope { code, data: { data: { rank } } }", () => {
+  const now = Date.UTC(2026, 10, 27, 5, 0, 0);
+  const raw = { code: 0, message: "success", data: { data: { rank: [row(), row({ address: "LowVol", volume: 1 })] } } };
+  const parsed = parseGmgnTrending(raw, rules, now);
+  assert.equal(parsed.ok, true);
+  assert.deepEqual(parsed.alerts.map(a => a.mint), [mint]);
+
+  const failed = parseGmgnTrending({ code: 40001, message: "bad sign" }, rules, now);
+  assert.equal(failed.ok, false);
+  assert.match(failed.reason, /code 40001.*bad sign/);
+  assert.match(parseGmgnTrending({ code: 0, data: { other: [] } }, rules, now).reason, /data keys: other/);
+});
+
+test("poller logs matches for a raw OpenAPI reply", async () => {
+  const logs = [];
+  const seen = [];
+  const poller = createGmgnTrendingPoller({
+    rules,
+    apiKey: "test-key",
+    log: m => logs.push(m),
+    onAlerts: alerts => seen.push(...alerts),
+    schedule: () => 1,
+    fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ code: 0, data: { data: { rank: [row()] } } }) }),
+  });
+  await poller.start();
+  poller.stop();
+  assert.ok(logs.some(m => m === "1 match(es)"), logs.join(" | "));
+  assert.deepEqual(seen.map(a => a.mint), [mint]);
+});
+
 test("poller pauses on a 429 and shares the pause through the gate", async () => {
   const gate = { pausedUntil: 0 };
   const delays = [];
