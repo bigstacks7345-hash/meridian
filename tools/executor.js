@@ -263,8 +263,15 @@ async function executeToolUnlocked(name, args) {
           if (poolAddr) addPoolNote({ pool_address: poolAddr, note: `Closed: low yield (fee/TVL below threshold) at ${new Date().toISOString().slice(0,10)}` }).catch?.(() => {});
         }
         // Auto-swap base token back to SOL unless user said to hold (retried).
+        // When the swap already landed inside the close bundle, the retry below
+        // only sweeps leftovers (it skips balances under $0.10).
+        if (!args.skip_swap && result.base_mint && result.swapped_in_bundle) {
+          result.auto_swapped = true;
+          result.auto_swap_note = `Base token swapped to SOL inside the close bundle (${result.base_mint.slice(0, 8)} → SOL). Do NOT call swap_token again.`;
+          if (result.bundle_swap?.out_amount) result.sol_received_lamports = result.bundle_swap.out_amount;
+        }
         if (!args.skip_swap && result.base_mint) {
-          const { swapped, result: swapResult } = await swapBaseToSolWithRetry(result.base_mint, "after close");
+          const { swapped, result: swapResult } = await swapBaseToSolWithRetry(result.base_mint, result.swapped_in_bundle ? "leftover after bundled close" : "after close");
           if (swapped) {
             // Tell the model the swap already happened so it doesn't call swap_token again
             result.auto_swapped = true;

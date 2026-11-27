@@ -2,7 +2,6 @@ import {
   Connection,
   Keypair,
   PublicKey,
-  sendAndConfirmTransaction,
 } from "@solana/web3.js";
 import BN from "bn.js";
 import bs58 from "bs58";
@@ -23,6 +22,30 @@ import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { normalizeMint } from "./wallet.js";
 import { appendDecision } from "../decision-log.js";
 import { computePositions, fetchDlmmPnlForPool } from "./pnl.js";
+import { landTransactions, landingSettings } from "./lander.js";
+import { buildBundledSwapItem, estimateCloseSwapAmount } from "./bundle-swap.js";
+
+// ─── Landing ───────────────────────────────────────────────────
+// Every wallet write goes through tools/lander.js (Jito bundle, RPC fallback).
+// Callers return early in shadow, so this is never reached there; the throw is
+// a second guard in case a future caller forgets.
+async function landWrites(request) {
+  const result = await landTransactions(request);
+  if (result?.dry_run) throw new Error(`${request.label}: landing reached in dry-run mode`);
+  return result;
+}
+
+function summarizeLandings(landings) {
+  const list = landings.filter(Boolean);
+  const methods = [...new Set(list.map((l) => l.method).filter((m) => m && m !== "none"))];
+  return {
+    method: methods.length > 1 ? "mixed" : methods[0] || "none",
+    bundles: list.flatMap((l) => l.bundles || []),
+    tip_lamports: list.reduce((sum, l) => sum + (l.tip_lamports || 0), 0),
+    transactions: list.reduce((sum, l) => sum + (l.signatures?.length || 0), 0),
+    dropped_optional: list.some((l) => l.dropped_optional),
+  };
+}
 
 // ─── Lazy SDK loader ───────────────────────────────────────────
 // @meteora-ag/dlmm → @coral-xyz/anchor uses CJS directory imports
@@ -412,6 +435,7 @@ export async function deployPosition({
 
   try {
     const txHashes = [];
+    const landings = [];
 
     if (isWideRange) {
       // ── Wide Range Path (>69 bins) ─────────────────────────────────
@@ -428,13 +452,16 @@ export async function deployPosition({
         wallet.publicKey,
       );
       const createTxArray = Array.isArray(createTxs) ? createTxs : [createTxs];
-      for (let i = 0; i < createTxArray.length; i++) {
-        const signers = i === 0 ? [wallet, newPosition] : [wallet];
-        await before_submit?.();
-        const txHash = await sendAndConfirmTransaction(getConnection(), createTxArray[i], signers);
-        txHashes.push(txHash);
-        log("deploy", `Create tx ${i + 1}/${createTxArray.length}: ${txHash}`);
-      }
+      await before_submit?.();
+      const created = await landWrites({
+        label: "deploy create",
+        tier: "entry",
+        connection: getConnection(),
+        items: createTxArray.map((tx, i) => ({ tx, signers: i === 0 ? [wallet, newPosition] : [wallet] })),
+      });
+      landings.push(created);
+      txHashes.push(...created.signatures);
+      log("deploy", `Create ${created.signatures.length} tx via ${created.method}: ${created.signatures.join(", ")}`);
 
       // Phase 2: Add liquidity (may be multiple txs)
       const addTxs = await pool.addLiquidityByStrategyChunkable({
@@ -446,12 +473,16 @@ export async function deployPosition({
         slippage: 1, // SDK expects percent
       });
       const addTxArray = Array.isArray(addTxs) ? addTxs : [addTxs];
-      for (let i = 0; i < addTxArray.length; i++) {
-        await before_submit?.();
-        const txHash = await sendAndConfirmTransaction(getConnection(), addTxArray[i], [wallet]);
-        txHashes.push(txHash);
-        log("deploy", `Add liquidity tx ${i + 1}/${addTxArray.length}: ${txHash}`);
-      }
+      await before_submit?.();
+      const added = await landWrites({
+        label: "deploy add liquidity",
+        tier: "entry",
+        connection: getConnection(),
+        items: addTxArray.map((tx) => ({ tx, signers: [wallet] })),
+      });
+      landings.push(added);
+      txHashes.push(...added.signatures);
+      log("deploy", `Add liquidity ${added.signatures.length} tx via ${added.method}: ${added.signatures.join(", ")}`);
     } else {
       // ── Standard Path (≤69 bins) ─────────────────────────────────
       const tx = await pool.initializePositionAndAddLiquidityByStrategy({
@@ -463,8 +494,14 @@ export async function deployPosition({
         slippage: 1, // SDK expects percent, not bps
       });
       await before_submit?.();
-      const txHash = await sendAndConfirmTransaction(getConnection(), tx, [wallet, newPosition]);
-      txHashes.push(txHash);
+      const landed = await landWrites({
+        label: "deploy",
+        tier: "entry",
+        connection: getConnection(),
+        items: [{ tx, signers: [wallet, newPosition] }],
+      });
+      landings.push(landed);
+      txHashes.push(...landed.signatures);
     }
 
     log("deploy", `SUCCESS — ${txHashes.length} tx(s): ${txHashes[0]}`);
@@ -535,6 +572,7 @@ export async function deployPosition({
       amount_x: finalAmountX,
       amount_y: finalAmountY,
       txs: txHashes,
+      landing: summarizeLandings(landings),
     };
   } catch (error) {
     log("deploy_error", error.message);
@@ -943,16 +981,18 @@ export async function claimFees({ position_address }) {
       return { success: false, error: "No fees to claim — transaction is empty" };
     }
 
-    const txHashes = [];
-    for (const tx of txs) {
-      const txHash = await sendAndConfirmTransaction(getConnection(), tx, [wallet]);
-      txHashes.push(txHash);
-    }
-    log("claim", `SUCCESS txs: ${txHashes.join(", ")}`);
+    const landed = await landWrites({
+      label: "claim fees",
+      tier: "routine",
+      connection: getConnection(),
+      items: txs.map((tx) => ({ tx, signers: [wallet] })),
+    });
+    const txHashes = landed.signatures;
+    log("claim", `SUCCESS via ${landed.method} txs: ${txHashes.join(", ")}`);
     _positionsCacheAt = 0; // invalidate cache after claim
     recordClaim(position_address);
 
-    return { success: true, position: position_address, txs: txHashes, base_mint: pool.lbPair.tokenXMint.toString() };
+    return { success: true, position: position_address, txs: txHashes, base_mint: pool.lbPair.tokenXMint.toString(), landing: summarizeLandings([landed]) };
   } catch (error) {
     log("claim_error", error.message);
     return { success: false, error: error.message };
@@ -960,7 +1000,7 @@ export async function claimFees({ position_address }) {
 }
 
 // ─── Close Position ────────────────────────────────────────────
-export async function closePosition({ position_address, reason }) {
+export async function closePosition({ position_address, reason, skip_swap = false }) {
   position_address = normalizeMint(position_address);
   if (transactionsAreDryRun()) {
     return { dry_run: true, would_close: position_address, message: "DRY RUN — no transaction sent" };
@@ -980,40 +1020,16 @@ export async function closePosition({ position_address, reason }) {
     const pool = await getPool(poolAddress);
 
     const positionPubKey = new PublicKey(position_address);
-    const claimTxHashes = [];
-    const closeTxHashes = [];
+    const landingConfig = landingSettings(config.landing || {});
 
-    // ─── Step 1: Claim Fees (to clear account state) ───────────
-    const recentlyClaimed = tracked?.last_claim_at && (Date.now() - new Date(tracked.last_claim_at).getTime()) < 60_000;
-    try {
-      if (recentlyClaimed) {
-        log("close", `Step 1: Skipping claim — fees already claimed ${Math.round((Date.now() - new Date(tracked.last_claim_at).getTime()) / 1000)}s ago`);
-      } else {
-        log("close", `Step 1: Claiming fees for ${position_address}`);
-        const positionData = await pool.getPosition(positionPubKey);
-        const claimTxs = await pool.claimSwapFee({
-          owner: wallet.publicKey,
-          position: positionData,
-        });
-        if (claimTxs && claimTxs.length > 0) {
-          for (const tx of claimTxs) {
-            const claimHash = await sendAndConfirmTransaction(getConnection(), tx, [wallet]);
-            claimTxHashes.push(claimHash);
-          }
-          log("close", `Step 1 OK (claim only): ${claimTxHashes.join(", ")}`);
-        }
-      }
-    } catch (e) {
-      log("close_warn", `Step 1 (Claim) failed or nothing to claim: ${e.message}`);
-    }
-
-    // ─── Step 2: Remove Liquidity & Close ──────────────────────
+    // ─── Read position state ───────────────────────────────────
+    let positionData = null;
     let hasLiquidity = false;
     let closeFromBinId = -887272;
     let closeToBinId = 887272;
     try {
-      const positionDataForClose = await pool.getPosition(positionPubKey);
-      const processed = positionDataForClose?.positionData;
+      positionData = await pool.getPosition(positionPubKey);
+      const processed = positionData?.positionData;
       if (processed) {
         closeFromBinId = processed.lowerBinId ?? closeFromBinId;
         closeToBinId = processed.upperBinId ?? closeToBinId;
@@ -1024,8 +1040,12 @@ export async function closePosition({ position_address, reason }) {
       log("close_warn", `Could not check liquidity state: ${e.message}`);
     }
 
+    // ─── One ordered landing: (claim) + remove/close + optional swap ──
+    // removeLiquidity with shouldClaimAndClose already claims fees and closes,
+    // so the separate claim step only runs on the no-liquidity path.
+    const items = [];
     if (hasLiquidity) {
-      log("close", `Step 2: Removing liquidity and closing account`);
+      log("close", `Removing liquidity, claiming and closing in one landing`);
       const closeTx = await pool.removeLiquidity({
         user: wallet.publicKey,
         position: positionPubKey,
@@ -1034,23 +1054,61 @@ export async function closePosition({ position_address, reason }) {
         bps: new BN(10000),
         shouldClaimAndClose: true,
       });
-
-      for (const tx of Array.isArray(closeTx) ? closeTx : [closeTx]) {
-        const txHash = await sendAndConfirmTransaction(getConnection(), tx, [wallet]);
-        closeTxHashes.push(txHash);
-      }
+      for (const tx of Array.isArray(closeTx) ? closeTx : [closeTx]) items.push({ tx, signers: [wallet] });
     } else {
-      log("close", `Step 2: No position liquidity detected, closing account`);
+      log("close", `No position liquidity detected, claiming and closing account`);
+      const recentlyClaimed = tracked?.last_claim_at && (Date.now() - new Date(tracked.last_claim_at).getTime()) < 60_000;
+      if (!recentlyClaimed && positionData) {
+        try {
+          const claimTxs = await pool.claimSwapFee({ owner: wallet.publicKey, position: positionData });
+          for (const tx of claimTxs || []) items.push({ tx, signers: [wallet] });
+        } catch (e) {
+          log("close_warn", `Claim build failed or nothing to claim: ${e.message}`);
+        }
+      }
       const closeTx = await pool.closePosition({
         owner: wallet.publicKey,
         position: { publicKey: positionPubKey },
       });
-      const txHash = await sendAndConfirmTransaction(getConnection(), closeTx, [wallet]);
-      closeTxHashes.push(txHash);
+      items.push({ tx: closeTx, signers: [wallet] });
     }
-    const txHashes = [...claimTxHashes, ...closeTxHashes];
-    log("close", `Step 2 OK (close only): ${closeTxHashes.join(", ") || "none"}`);
-    log("close", `SUCCESS txs: ${txHashes.join(", ")}`);
+
+    // Zap-out: the token-X -> SOL swap rides in the same bundle as the close.
+    const baseMint = pool.lbPair.tokenXMint.toString();
+    let bundleSwap = null;
+    if (hasLiquidity && !skip_swap && landingConfig.mode === "jito" && landingConfig.swapInBundle && baseMint !== config.tokens.SOL) {
+      const amountRaw = estimateCloseSwapAmount(positionData?.positionData, landingConfig.swapAmountBufferBps);
+      if (amountRaw) {
+        try {
+          const swapItem = await buildBundledSwapItem({
+            connection: getConnection(),
+            wallet,
+            inputMint: baseMint,
+            outputMint: config.tokens.SOL,
+            amountRaw,
+            slippageBps: landingConfig.swapSlippageBps,
+            computeUnitLimit: landingConfig.swapComputeUnitLimit,
+          });
+          bundleSwap = swapItem.quote;
+          items.push(swapItem);
+        } catch (e) {
+          log("close_warn", `Bundled swap not built, executor will swap after close: ${e.message}`);
+        }
+      }
+    }
+
+    const landed = await landWrites({ label: "close", tier: "exit", connection: getConnection(), items });
+    const txHashes = landed.signatures;
+    const swappedInBundle = Boolean(bundleSwap) && !landed.dropped_optional;
+    log("close", `SUCCESS via ${landed.method} txs: ${txHashes.join(", ")}${swappedInBundle ? " (swap in bundle)" : ""}`);
+    // Claim, remove and close now land together; kept for log/report compatibility.
+    const claimTxHashes = [];
+    const closeTxHashes = txHashes;
+    const landingFields = {
+      landing: summarizeLandings([landed]),
+      swapped_in_bundle: swappedInBundle,
+      bundle_swap: swappedInBundle ? bundleSwap : null,
+    };
     // Wait for RPC to reflect withdrawn balances before returning — prevents
     // agent from seeing zero balance when attempting post-close swap
     await new Promise(r => setTimeout(r, 5000));
@@ -1081,6 +1139,7 @@ export async function closePosition({ position_address, reason }) {
         claim_txs: claimTxHashes,
         close_txs: closeTxHashes,
         txs: txHashes,
+        ...landingFields,
       };
     }
 
@@ -1243,6 +1302,7 @@ export async function closePosition({ position_address, reason }) {
         claim_txs: claimTxHashes,
         close_txs: closeTxHashes,
         txs: txHashes,
+        ...landingFields,
         pnl_usd: pnlUsd,
         pnl_pct: pnlPct,
         base_mint: closeBaseMint,
@@ -1268,6 +1328,7 @@ export async function closePosition({ position_address, reason }) {
       claim_txs: claimTxHashes,
       close_txs: closeTxHashes,
       txs: txHashes,
+      ...landingFields,
       base_mint: pool.lbPair.tokenXMint.toString(),
     };
   } catch (error) {

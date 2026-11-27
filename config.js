@@ -64,6 +64,32 @@ function gmgnTrendingConfig(raw = {}) {
   };
 }
 
+// Transaction landing overrides. Unknown keys are dropped; bad values fall back to
+// the defaults in tools/lander.js. JITO_BLOCK_ENGINE_URL overrides the block engine.
+const LANDING_NUMBER_KEYS = [
+  "entryTipPercentile", "exitTipPercentile", "routineTipPercentile",
+  "minTipLamports", "maxEntryTipLamports", "maxExitTipLamports", "maxRoutineTipLamports", "fallbackTipLamports",
+  "bundlePriorityMicroLamports", "attempts", "priorityFeePercentile", "minPriorityMicroLamports", "maxPriorityMicroLamports",
+  "pollMs", "inflightPollMs", "confirmTimeoutMs", "swapSlippageBps", "swapAmountBufferBps", "swapComputeUnitLimit",
+];
+export function landingConfig(raw = {}) {
+  const out = {};
+  if (raw && typeof raw === "object") {
+    if (raw.mode === "jito" || raw.mode === "rpc") out.mode = raw.mode;
+    for (const key of ["rpcFallback", "swapInBundle"]) if (typeof raw[key] === "boolean") out[key] = raw[key];
+    for (const key of LANDING_NUMBER_KEYS) {
+      const n = Number(raw[key]);
+      if (raw[key] !== undefined && Number.isFinite(n) && n >= 0) out[key] = n;
+    }
+    if (raw.entryTipPercentile === "ema50") out.entryTipPercentile = "ema50";
+    if (raw.exitTipPercentile === "ema50") out.exitTipPercentile = "ema50";
+    if (raw.routineTipPercentile === "ema50") out.routineTipPercentile = "ema50";
+  }
+  const engine = nonEmptyString(process.env.JITO_BLOCK_ENGINE_URL, raw?.blockEngineUrl);
+  if (engine && /^https:\/\//.test(engine)) out.blockEngineUrl = engine;
+  return out;
+}
+
 function numericConfig(value) {
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
@@ -251,6 +277,10 @@ export const config = {
     // GMGN trending hits open their own signal, like Fabriq. Needs GMGN_API_KEY.
     gmgnTrending: gmgnTrendingConfig(u.externalSignals?.gmgnTrending),
   },
+
+  // Transaction landing (tools/lander.js). Only keys set here override the module
+  // defaults in LANDING_DEFAULTS; shadow builds never reach the landing code.
+  landing: landingConfig(u.landing),
 
   jupiter: {
     // Internal Jupiter Ultra settings; override by env only, do not expose in user-config.
