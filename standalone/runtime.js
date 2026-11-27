@@ -14,6 +14,7 @@ import { MonitorStore, acceptExternalAlert, acceptFabriqAlert, dropUnfinishedSig
 import { createGmgnTrendingPoller } from "./gmgn-trending.js";
 import { createFabriqPoller, withFabriqContext } from "./fabriq.js";
 import { createSeaStateScheduler } from "./sea-state.js";
+import { createWeeklyScheduler } from "./weekly-report.js";
 import { WalletMonitor } from "./monitor.js";
 import { screenMint, poolDetail } from "./screening.js";
 import { exposureStillPresent } from "./events.js";
@@ -40,6 +41,7 @@ let stopAdmin = null;
 let stopFabriq = () => {};
 let stopGmgnTrending = () => {};
 let stopSeaState = () => {};
+let stopWeekly = () => {};
 let notifySink = null;
 let fabriqStartupPending = true;
 let shuttingDown = false;
@@ -811,6 +813,19 @@ function startSeaStateWatch() {
   return () => scheduler.stop();
 }
 
+function startWeeklyReport() {
+  const rules = config.coinCycles;
+  if (!rules?.enabled) return () => {};
+  const scheduler = createWeeklyScheduler({
+    rules,
+    log: message => log("weekly", message),
+    notify,
+  });
+  void scheduler.start();
+  log("weekly", `Weekly coin-cycle report Mondays ${rules.runAtUtc} UTC (${rules.windowHours}h window, bounce +${rules.bouncePct}%)`);
+  return () => scheduler.stop();
+}
+
 function acquireLock() {
   lockPath = repoPath("standalone.lock");
   if (fs.existsSync(lockPath)) {
@@ -832,6 +847,7 @@ async function shutdown(signalName) {
   try { stopFabriq(); } catch { /* best-effort */ }
   try { stopGmgnTrending(); } catch { /* best-effort */ }
   try { stopSeaState(); } catch { /* best-effort */ }
+  try { stopWeekly(); } catch { /* best-effort */ }
   try { stopAdmin?.(); } catch { /* best-effort */ }
   try { await monitor?.stop(); } catch { /* best-effort */ }
   // Best-effort stop notice; never let a slow Telegram call hold shutdown.
@@ -857,6 +873,7 @@ export async function startStandalone() {
   stopFabriq = startFabriqWatch();
   stopGmgnTrending = startGmgnTrendingWatch();
   stopSeaState = startSeaStateWatch();
+  stopWeekly = startWeeklyReport();
   const modeLabel = transactionsAreDryRun()
     ? (config.standalone.shadow ? "SHADOW MODE (proposals recorded, nothing submitted)" : "DRY RUN (shadow is off, but DRY_RUN=true still blocks submits)")
     : "LIVE MODE";

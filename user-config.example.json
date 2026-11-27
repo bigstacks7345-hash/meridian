@@ -47,6 +47,13 @@
     "runAtUtc": "01:30",
     "lookbackDays": 400
   },
+  "coinCycles": {
+    "enabled": true,
+    "notify": true,
+    "runAtUtc": "02:00",
+    "windowHours": 72,
+    "bouncePct": 20
+  },
   "walletReconcileSec": 30,
   "minSmartWalletDepositSol": 0.1,
   "maxEntryPriceMovePct": 5,
