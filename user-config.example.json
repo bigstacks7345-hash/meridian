@@ -41,6 +41,12 @@
       "staleAfterSec": 1800
     }
   },
+  "seaState": {
+    "enabled": true,
+    "notify": true,
+    "runAtUtc": "01:30",
+    "lookbackDays": 400
+  },
   "walletReconcileSec": 30,
   "minSmartWalletDepositSol": 0.1,
   "maxEntryPriceMovePct": 5,

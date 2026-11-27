@@ -64,6 +64,33 @@ function gmgnTrendingConfig(raw = {}) {
   };
 }
 
+// Daily Meteora DLMM sea state (LiquidFleet-style Sea Index). Read-only.
+// DefiLlama under-counted DLMM volume before 2026-11-04; the calibration scales
+// that history so the reading lines up with LiquidFleet's (-67% vs their -66%
+// on 2026-11-26).
+function seaStateConfig(raw = {}) {
+  const pick = (value, fallback, min = 0) => {
+    const n = Number(value);
+    return Number.isFinite(n) && n > min ? n : fallback;
+  };
+  const runAtUtc = /^([01]\d|2[0-3]):[0-5]\d$/.test(String(raw.runAtUtc ?? "")) ? raw.runAtUtc : "01:30";
+  const calibration = Array.isArray(raw.calibration) && raw.calibration.length
+    ? raw.calibration
+    : [{ until: "2026-11-04", factor: 1.42 }, { factor: 1.01 }];
+  return {
+    enabled: raw.enabled === undefined ? true : Boolean(raw.enabled),
+    notify: raw.notify === undefined ? true : Boolean(raw.notify),
+    runAtUtc,
+    lookbackDays: Math.round(pick(raw.lookbackDays, 400)),
+    minHistoryDays: 30,
+    retryMin: pick(raw.retryMin, 30),
+    maxRetries: Math.round(pick(raw.maxRetries, 6, -1)),
+    calibration,
+    volumeUrl: "https://api.llama.fi/summary/dexs/meteora-dlmm?excludeTotalDataChartBreakdown=true",
+    fearGreedUrl: "https://api.alternative.me/fng/?limit=1",
+  };
+}
+
 function numericConfig(value) {
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
@@ -251,6 +278,9 @@ export const config = {
     // GMGN trending hits open their own signal, like Fabriq. Needs GMGN_API_KEY.
     gmgnTrending: gmgnTrendingConfig(u.externalSignals?.gmgnTrending),
   },
+
+  // Daily market context only. It never gates entries.
+  seaState: seaStateConfig(u.seaState),
 
   jupiter: {
     // Internal Jupiter Ultra settings; override by env only, do not expose in user-config.
