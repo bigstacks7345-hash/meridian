@@ -287,9 +287,9 @@ export const config = {
     apiKey: process.env.JUPITER_API_KEY ?? "",
     referralAccount:
       process.env.JUPITER_REFERRAL_ACCOUNT ??
-      "9MzhDUnq3KxecyPzvhguQMMPbooXQ3VAoCMPDnoijwey",
+      "", // no built-in referral: swaps pay no fee to a third-party wallet
     referralFeeBps: Number(
-      process.env.JUPITER_REFERRAL_FEE_BPS ?? 50,
+      process.env.JUPITER_REFERRAL_FEE_BPS ?? 0,
     ),
   },
 
