@@ -51,6 +51,7 @@ const steps = [
     "test/liquidity-sim.test.js",
     "test/sea-state.test.js",
     "test/coin-cycles.test.js",
+    "test/dashboard.test.js",
   ]],
 ];
 

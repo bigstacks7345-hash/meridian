@@ -1,0 +1,77 @@
+{
+  "note": "Public LP wallet addresses tracked by the fleet census. Addresses only, from the Oct 7 2026 elite LP scan (consistent winners). Edit freely.",
+  "wallets": [
+    {
+      "address": "3ryaTJFiDHgA1U9CyTwuy57KkFk8UJMLnDM28mK1opui",
+      "label": "elite"
+    },
+    {
+      "address": "Bdrs3hKcEe4PpM91risoYm5YKceQ7tsaovs4otog6HBz",
+      "label": "whale"
+    },
+    {
+      "address": "HSMhEbkbtUAh2EM26P5Sz1mUswBiSerYG8xk1zXXPrrP",
+      "label": "elite"
+    },
+    {
+      "address": "BNXL1R1acnUK24Xoz4i4h6KKN3Z8XjU8853VLE4yjyWk",
+      "label": "whale"
+    },
+    {
+      "address": "66Ty8anQbfzpJfUtqwhGuDqGzS3KM7zLqreRZQ5vfVgP",
+      "label": "elite"
+    },
+    {
+      "address": "GTqBcwyZcGKUQp1PwreLaQYh125CpHKwPNehbFN5fRSF",
+      "label": "elite"
+    },
+    {
+      "address": "GgR86eHVxj4Q1XcpTQBjc8zUAEXQMSM3MNVUVPwDjBRd",
+      "label": "elite"
+    },
+    {
+      "address": "5U4aB79NaR76RSM1qFnEtB869wXP1NnVyRDp22whAUWj",
+      "label": "whale"
+    },
+    {
+      "address": "FpfnQzbBk1oSTcJQbBFnnF2T1UM9bvd9439kJaJaw4b1",
+      "label": "elite"
+    },
+    {
+      "address": "CdvToRD3jfiLc4XaH4Ei1FQSVSGsZz1yxf2WxgiNYbmk",
+      "label": "elite"
+    },
+    {
+      "address": "AuT92NT9PWmRdNdK6GPbQk8n5vBXfpB4tUP9e9Kj3bLu",
+      "label": "whale"
+    },
+    {
+      "address": "4MGLdfi4AbKWd54ymgFWZbsXaMyTTN1J8PQ5EEM1xhUG",
+      "label": "elite"
+    },
+    {
+      "address": "2BqTvkdyMMXk1aFThvRa9VcSeFG9i3iP8GAj2F6azX1y",
+      "label": "elite"
+    },
+    {
+      "address": "gh7gW8FtC8ygPnM8GMPtaufTXenNvck8Fi4cR2Up82w",
+      "label": "whale"
+    },
+    {
+      "address": "5ByvDm16wh6XWCm2jKQrPyDVLzM9zdiea7vLyubwAYWL",
+      "label": "elite"
+    },
+    {
+      "address": "JCCHjYkL1hM546GHxqqPM1bc7ych8ErLrLDiCivfAexy",
+      "label": "whale"
+    },
+    {
+      "address": "3nrPqxVoxTe56vRmBJjnMHAQUdQ1TEqx6D2LUi1Jduu1",
+      "label": "whale"
+    },
+    {
+      "address": "HN5PTUK1WcDD9GkQWvBYwbGzHqB7afWn1HAQ5aQZzGZa",
+      "label": "elite"
+    }
+  ]
+}

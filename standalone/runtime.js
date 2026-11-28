@@ -15,6 +15,8 @@ import { createGmgnTrendingPoller } from "./gmgn-trending.js";
 import { createFabriqPoller, withFabriqContext } from "./fabriq.js";
 import { createSeaStateScheduler } from "./sea-state.js";
 import { createWeeklyScheduler } from "./weekly-report.js";
+import { createFleetCensus, fleetWallets } from "./fleet-census.js";
+import { createSnapshotBuilder, startDashboard } from "./dashboard.js";
 import { WalletMonitor } from "./monitor.js";
 import { screenMint, poolDetail } from "./screening.js";
 import { exposureStillPresent } from "./events.js";
@@ -42,6 +44,8 @@ let stopFabriq = () => {};
 let stopGmgnTrending = () => {};
 let stopSeaState = () => {};
 let stopWeekly = () => {};
+let stopFleet = () => {};
+let stopDashboard = async () => {};
 let notifySink = null;
 let fabriqStartupPending = true;
 let shuttingDown = false;
@@ -826,6 +830,23 @@ function startWeeklyReport() {
   return () => scheduler.stop();
 }
 
+function startFleetCensus() {
+  const rules = config.fleetCensus;
+  if (!rules?.enabled) return () => {};
+  const wallets = () => fleetWallets(config.ownerStrategy?.wallets || []);
+  const census = createFleetCensus({ rules, wallets, log: message => log("fleet", message) });
+  void census.start();
+  log("fleet", `Fleet census every ${rules.everyMin}m over ${wallets().length} wallets`);
+  return () => census.stop();
+}
+
+function startDashboardServer() {
+  const rules = config.dashboard;
+  if (!rules?.enabled) return async () => {};
+  const handle = startDashboard({ rules, buildSnapshot: createSnapshotBuilder({ config }), log: message => log("dashboard", message) });
+  return handle ? handle.close : async () => {};
+}
+
 function acquireLock() {
   lockPath = repoPath("standalone.lock");
   if (fs.existsSync(lockPath)) {
@@ -848,6 +869,8 @@ async function shutdown(signalName) {
   try { stopGmgnTrending(); } catch { /* best-effort */ }
   try { stopSeaState(); } catch { /* best-effort */ }
   try { stopWeekly(); } catch { /* best-effort */ }
+  try { stopFleet(); } catch { /* best-effort */ }
+  try { await Promise.race([stopDashboard(), sleep(2000)]); } catch { /* best-effort */ }
   try { stopAdmin?.(); } catch { /* best-effort */ }
   try { await monitor?.stop(); } catch { /* best-effort */ }
   // Best-effort stop notice; never let a slow Telegram call hold shutdown.
@@ -874,6 +897,8 @@ export async function startStandalone() {
   stopGmgnTrending = startGmgnTrendingWatch();
   stopSeaState = startSeaStateWatch();
   stopWeekly = startWeeklyReport();
+  stopFleet = startFleetCensus();
+  stopDashboard = startDashboardServer();
   const modeLabel = transactionsAreDryRun()
     ? (config.standalone.shadow ? "SHADOW MODE (proposals recorded, nothing submitted)" : "DRY RUN (shadow is off, but DRY_RUN=true still blocks submits)")
     : "LIVE MODE";

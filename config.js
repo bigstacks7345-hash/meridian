@@ -91,6 +91,35 @@ function seaStateConfig(raw = {}) {
   };
 }
 
+// Fleet census: hourly read of tracked LP wallets' positions from Meteora's
+// datapi for the dashboard's LP Pulse. Read-only.
+function fleetCensusConfig(raw = {}) {
+  const pick = (value, fallback, min = 0) => {
+    const n = Number(value);
+    return Number.isFinite(n) && n > min ? n : fallback;
+  };
+  return {
+    enabled: raw.enabled === undefined ? true : Boolean(raw.enabled),
+    everyMin: Math.max(15, pick(raw.everyMin, 60)),
+    lookbackHours: pick(raw.lookbackHours, 48),
+    backfillHours: pick(raw.backfillHours, 144),
+    maxPoolsPerWallet: Math.round(pick(raw.maxPoolsPerWallet, 20)),
+    requestGapMs: Math.max(200, pick(raw.requestGapMs, 400)),
+  };
+}
+
+// Read-only web dashboard. Binds to loopback unless a host is set; any other
+// host requires DASHBOARD_TOKEN, passed as ?token= on the URL.
+function dashboardConfig(raw = {}) {
+  const port = Number(raw.port);
+  return {
+    enabled: raw.enabled === undefined ? true : Boolean(raw.enabled),
+    host: nonEmptyString(raw.host) || "127.0.0.1",
+    port: Number.isInteger(port) && port > 0 && port < 65536 ? port : 8787,
+    token: process.env.DASHBOARD_TOKEN || "",
+  };
+}
+
 // Weekly coin-cycle report: how far triggered coins run and how deep they dump
 // before an exit bounce. GeckoTerminal candles (free, 30 req/min). Read-only.
 function coinCyclesConfig(raw = {}) {
@@ -305,6 +334,8 @@ export const config = {
   // Daily market context only. It never gates entries.
   seaState: seaStateConfig(u.seaState),
   coinCycles: coinCyclesConfig(u.coinCycles),
+  fleetCensus: fleetCensusConfig(u.fleetCensus),
+  dashboard: dashboardConfig(u.dashboard),
 
   jupiter: {
     // Internal Jupiter Ultra settings; override by env only, do not expose in user-config.
