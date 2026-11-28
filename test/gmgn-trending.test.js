@@ -22,29 +22,30 @@ function tempStore() {
   return { file, store: new MonitorStore(file) };
 }
 
-test("gmgn trending defaults match the PC lp_alert.ps1 script", () => {
+test("gmgn trending defaults are loosened to $50k 5m volume and $300k mcap", () => {
   assert.equal(rules.enabled, true);
   assert.equal(rules.pollSec, 60);
-  assert.equal(rules.minVolume5mUsd, 150_000);
-  assert.equal(rules.minMarketCapUsd, 750_000);
+  assert.equal(rules.minVolume5mUsd, 50_000);
+  assert.equal(rules.minMarketCapUsd, 300_000);
   assert.equal(rules.maxBundlerRate, 0.5);
   const url = gmgnTrendingUrl(rules);
   assert.equal(url.origin + url.pathname, "https://openapi.gmgn.ai/v1/market/rank");
   assert.equal(url.searchParams.get("interval"), "5m");
-  assert.equal(url.searchParams.get("min_volume"), "150000");
-  assert.equal(url.searchParams.get("min_marketcap"), "750000");
+  assert.equal(url.searchParams.get("min_volume"), "50000");
+  assert.equal(url.searchParams.get("min_marketcap"), "300000");
   assert.equal(url.searchParams.get("max_bundler_rate"), "0.5");
   assert.equal(url.searchParams.get("order_by"), "volume");
   const example = JSON.parse(fs.readFileSync(new URL("../user-config.example.json", import.meta.url), "utf8"));
-  assert.equal(example.externalSignals.gmgnTrending.minVolume5mUsd, 150000);
+  assert.equal(example.externalSignals.gmgnTrending.minVolume5mUsd, 50000);
+  assert.equal(example.externalSignals.gmgnTrending.minMarketCapUsd, 300000);
 });
 
 test("parser re-checks every rule locally and drops rows with missing metrics", () => {
   const now = Date.UTC(2026, 10, 25, 14, 0, 0);
   const body = { data: { rank: [
     row(),
-    row({ address: "LowVol", volume: 149_999 }),
-    row({ address: "LowMcap", market_cap: 700_000 }),
+    row({ address: "LowVol", volume: 49_999 }),
+    row({ address: "LowMcap", market_cap: 299_999 }),
     row({ address: "Bundled", bundler_rate: 0.5 }),
     row({ address: "NoBundler", bundler_rate: null }),
   ] } };

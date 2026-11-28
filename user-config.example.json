@@ -35,8 +35,8 @@
     "gmgnTrending": {
       "enabled": true,
       "pollSec": 60,
-      "minVolume5mUsd": 150000,
-      "minMarketCapUsd": 750000,
+      "minVolume5mUsd": 50000,
+      "minMarketCapUsd": 300000,
       "maxBundlerRate": 0.5,
       "staleAfterSec": 1800
     }
