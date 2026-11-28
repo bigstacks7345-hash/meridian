@@ -37,11 +37,14 @@ Supported infrastructure overrides:
 | `PNL_SOURCE` | `meteora` (default) or `rpc` |
 | `PNL_RPC_URL` | Optional on-chain PnL engine endpoint |
 | `JUPITER_API_KEY` | Jupiter price and swap access. Required for authenticated calls; the process has no built-in key |
-| `JUPITER_REFERRAL_ACCOUNT`, `JUPITER_REFERRAL_FEE_BPS` | Optional override for the live-swap referral |
+| `JUPITER_REFERRAL_ACCOUNT`, `JUPITER_REFERRAL_FEE_BPS` | Optional Jupiter referral fee on live swaps. Off unless both are set |
+| `JITO_BLOCK_ENGINE_URL` | Optional Jito block engine (default Frankfurt). Pick the region nearest the server |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | Optional outbound notifications |
 | `TELEGRAM_ALLOWED_USER_IDS` | Enables the in-chat admin console. Leave unset to keep it off |
 
-Balances use standard RPC, including SPL Token and Token-2022. PnL defaults to Meteora portfolio and position APIs, with an on-chain fallback. Jupiter supplies prices, token data, and swaps. Live swaps attach the built-in referral unless those referral variables override it.
+Balances use standard RPC, including SPL Token and Token-2022. PnL defaults to Meteora portfolio and position APIs, with an on-chain fallback. Jupiter supplies prices, token data, and swaps. Live swaps carry no referral fee unless those referral variables are set.
+
+Live wallet writes (deploy, claim, close) go through `tools/lander.js`. Each is sent as a Jito bundle with a tip taken from Jito's live tip floor: entries at the 50th percentile (cap 100k lamports), exits at the 75th (cap 1M), claims at the 25th (cap 20k), never below 1,000. A bundle that does not land is retried, then sent through RPC with a priority fee from recent fees on the same accounts. A close lands claim, remove liquidity, close, and the token-to-SOL swap (Jupiter Swap v1 instructions) as one atomic bundle. If the bundle falls back to RPC, the swap is dropped and the existing post-close swap sells the token. Settings live in `landing` in the example config. Shadow mode never reaches the lander.
 
 This build forces shadow mode and `DRY_RUN=true`. `npm run safety` stays at `"willSubmit": false`. Telegram notifications can still be sent. The admin console does not start, so it cannot arm trading, import a key, or display a key.
 
