@@ -358,3 +358,29 @@ test("the poller backs off, dedupes by post id, and never requests GMGN", async 
   assert.equal(urls.every(url => !url.includes("gmgn")), true);
   poller.stop();
 });
+
+test("the poller parses and logs a broken post once, then skips it", async () => {
+  const page = `${fixture}<div class="tgme_widget_message" data-post="fabriqalert/41591"><div class="tgme_widget_message_text js-message_text">no contract here</div></div>`;
+  const logs = [];
+  const queued = [];
+  let seen = [];
+  const poller = createFabriqPoller({
+    url: "https://t.me/s/fabriqalert",
+    fetchImpl: async () => ({ ok: true, text: async () => page }),
+    onAlerts: alerts => { seen = alerts; },
+    log: line => logs.push(line),
+    schedule: (fn, ms) => { queued.push({ fn, ms }); return queued.length; },
+    clear: () => {},
+  });
+  await poller.start();
+  await queued[0].fn();
+  await queued[1].fn();
+  const hits = logs.filter(line => line.includes("41591"));
+  assert.equal(hits.length, 1);
+  assert.match(hits[0], /contract missing \(skipping this post from now on\)/);
+  assert.equal(seen.length, 20);
+  const direct = parseFabriqPage(page, { skip: new Set(["fabriqalert/41591"]) });
+  assert.equal(direct.errors.length, 0);
+  assert.equal(direct.alerts.length, 20);
+  poller.stop();
+});

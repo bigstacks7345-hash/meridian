@@ -40,7 +40,8 @@ function fabriqConfig(raw = {}) {
 }
 
 // GMGN trending watch (ported from the PC script gmgn-alerts/lp_alert.ps1).
-// Defaults match that script: 5m vol >= $150k, mcap >= $750k, bundled < 50%, 60s poll.
+// Script used 5m vol >= $150k, mcap >= $750k; Thomas saw 0 matches in 143 polls on
+// 2026-11-27 with those, so defaults are loosened to $50k / $300k. Bundled < 50%, 60s poll unchanged.
 function gmgnTrendingConfig(raw = {}) {
   const pick = (value, fallback, min = 0) => {
     const n = Number(value);
@@ -50,8 +51,8 @@ function gmgnTrendingConfig(raw = {}) {
   return {
     enabled: raw.enabled === undefined ? true : Boolean(raw.enabled),
     pollSec: Math.max(30, pick(raw.pollSec, 60)),
-    minVolume5mUsd: pick(raw.minVolume5mUsd, 150_000),
-    minMarketCapUsd: pick(raw.minMarketCapUsd, 750_000),
+    minVolume5mUsd: pick(raw.minVolume5mUsd, 50_000),
+    minMarketCapUsd: pick(raw.minMarketCapUsd, 300_000),
     maxBundlerRate: Number.isFinite(bundler) && bundler > 0 && bundler <= 1 ? bundler : 0.5,
     limit: Math.min(100, Math.round(pick(raw.limit, 50))),
     staleAfterSec: pick(raw.staleAfterSec, 1800),

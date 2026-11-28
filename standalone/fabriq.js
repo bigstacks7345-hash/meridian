@@ -6,26 +6,33 @@ const POST_RE = /data-post="(fabriqalert\/\d+)"/g;
 const MINT_RE = /<code>([1-9A-HJ-NP-Za-km-z]{32,44})<\/code>/;
 const POOL_RE = /meteora\.ag\/dlmm\/([1-9A-HJ-NP-Za-km-z]+)/;
 
-export function parseFabriqPage(html) {
+// skip: post ids that already failed to parse. They are not parsed or reported again.
+export function parseFabriqPage(html, { skip = null } = {}) {
   const alerts = [];
   const errors = [];
+  const failedIds = [];
   if (typeof html !== "string" || !html.includes("data-post=")) {
     errors.push("no fabriq posts");
-    return { alerts, errors };
+    return { alerts, errors, failedIds };
   }
   const marks = [];
   for (const match of html.matchAll(POST_RE)) marks.push({ id: match[1], index: match.index });
   for (let i = 0; i < marks.length; i++) {
+    if (skip?.has(marks[i].id)) continue;
     const chunk = html.slice(marks[i].index, marks[i + 1]?.index ?? html.length);
     try {
       const parsed = parseFabriqPost(marks[i].id, chunk);
       if (parsed.ok) alerts.push(parsed.alert);
-      else errors.push(`${marks[i].id}: ${parsed.reason}`);
+      else {
+        errors.push(`${marks[i].id}: ${parsed.reason}`);
+        failedIds.push(marks[i].id);
+      }
     } catch (error) {
       errors.push(`${marks[i].id}: ${error.message}`);
+      failedIds.push(marks[i].id);
     }
   }
-  return { alerts, errors };
+  return { alerts, errors, failedIds };
 }
 
 function parseFabriqPost(id, chunk) {
@@ -128,13 +135,21 @@ export function createFabriqPoller({
   let timer = null;
   const base = Math.max(1, Number(pollSec) || 20) * 1000;
   let delay = base;
+  // Posts that failed to parse (e.g. no contract address) stay on the public page
+  // for hours. Remember them so each is parsed and logged once, not every poll.
+  const failed = new Set();
+  const MAX_FAILED = 1000;
   async function tick() {
     if (stopped) return;
     try {
       const response = await fetchImpl(url, { headers: { "user-agent": userAgent, accept: "text/html" } });
       if (!response?.ok) throw new Error(`fabriq status ${response?.status ?? "unknown"}`);
-      const { alerts, errors } = parseFabriqPage(await response.text());
-      for (const error of errors) log(`parse: ${error}`);
+      const { alerts, errors, failedIds } = parseFabriqPage(await response.text(), { skip: failed });
+      for (const error of errors) log(`parse: ${error}${error.startsWith("fabriqalert/") ? " (skipping this post from now on)" : ""}`);
+      for (const id of failedIds) {
+        failed.add(id);
+        if (failed.size > MAX_FAILED) failed.delete(failed.values().next().value);
+      }
       onAlerts(alerts);
       delay = base;
     } catch (error) {
