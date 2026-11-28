@@ -54,6 +54,16 @@
     "windowHours": 72,
     "bouncePct": 20
   },
+  "fleetCensus": {
+    "enabled": true,
+    "everyMin": 60,
+    "lookbackHours": 48
+  },
+  "dashboard": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": 8787
+  },
   "walletReconcileSec": 30,
   "minSmartWalletDepositSol": 0.1,
   "maxEntryPriceMovePct": 5,

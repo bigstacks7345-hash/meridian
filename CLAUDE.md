@@ -10,6 +10,10 @@ The app is the standalone wallet-triggered bot. There is no legacy mode or LLM d
 - `standalone/runtime.js`: signal pursuit, screening deadlines, entry execution, deterministic management, fast exit polling, heartbeat, process lock.
 - `standalone/fabriq.js`: public Fabriq HOT preview. A fresh alert is its own signal and uses the same entry filters. It is not a watched wallet.
 - `standalone/gmgn-trending.js`: GMGN trending watch (`/v1/market/rank`), ported from the PC `lp_alert.ps1`. A hit opens its own signal like Fabriq and uses the same entry filters.
+- `standalone/sea-state.js`: daily DLMM Sea Index (DefiLlama volume vs 400-day average, calibrated), `state/sea-YYYY-MM-DD.json` and one Telegram line. Context only; never gates entries.
+- `standalone/coin-cycles.js`, `standalone/weekly-report.js`: Monday report on how far screened coins ran and how deep they dumped before a bounce (GeckoTerminal 5m candles, paced, cached under `state/candles/`), with range-width suggestions in bins. Never changes range config.
+- `standalone/fleet-census.js`: hourly read of the fleet's positions (watched wallets + `data/fleet-wallets.json`) from Meteora's datapi into `state/fleet-positions.json` for the LP Pulse.
+- `standalone/dashboard.js`, `standalone/dashboard.html`: read-only "Thomas Deck" web page and `/api/snapshot`. Binds 127.0.0.1:8787 by default; any other host requires `DASHBOARD_TOKEN`. GET only.
 - `standalone/monitor.js`: subscriptions, transaction queue, baseline, signature backfill.
 - `standalone/events.js`: DLMM event-CPI decoding and position/exposure checks. SDK is loaded lazily.
 - `standalone/store.js`: persisted deduplication, convergence windows, cooldowns, and recovery attempts.
